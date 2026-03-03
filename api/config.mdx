@@ -1,0 +1,193 @@
+---
+title: Config module
+description: Configuration variables for API credentials, database connection, and city list
+---
+
+The config module centralizes all configuration variables used throughout the ETL pipeline. It loads sensitive credentials from environment variables and defines the list of cities to process.
+
+## Environment variables
+
+The module uses `python-dotenv` to load configuration from a `.env` file. All configuration values are loaded at module import time.
+
+```python
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+```
+
+## API configuration
+
+### API_KEY
+
+OpenWeatherMap API key for authenticating requests.
+
+```python
+API_KEY = os.getenv("API_KEY")
+```
+
+<ParamField path="API_KEY" type="str">
+  API key for the OpenWeatherMap API. Loaded from the `API_KEY` environment variable. Required for all weather data extraction operations.
+</ParamField>
+
+**Environment variable**: `API_KEY`
+
+**Usage**:
+```python
+from config import API_KEY
+
+url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}"
+```
+
+## Database configuration
+
+PostgreSQL connection parameters for loading weather data.
+
+### host
+
+Database server hostname or IP address.
+
+```python
+host = os.getenv("HOST_NAME")
+```
+
+<ParamField path="host" type="str">
+  PostgreSQL server hostname or IP address. Loaded from the `HOST_NAME` environment variable.
+</ParamField>
+
+**Environment variable**: `HOST_NAME`
+
+### dbname
+
+Name of the PostgreSQL database.
+
+```python
+dbname = os.getenv("DBNAME")
+```
+
+<ParamField path="dbname" type="str">
+  Name of the PostgreSQL database containing the weather and city tables. Loaded from the `DBNAME` environment variable.
+</ParamField>
+
+**Environment variable**: `DBNAME`
+
+### port
+
+PostgreSQL server port number.
+
+```python
+port = os.getenv("PORT")
+```
+
+<ParamField path="port" type="str">
+  PostgreSQL server port number (typically 5432). Loaded from the `PORT` environment variable.
+</ParamField>
+
+**Environment variable**: `PORT`
+
+### user
+
+Database user for authentication.
+
+```python
+user = os.getenv("USER")
+```
+
+<ParamField path="user" type="str">
+  PostgreSQL username for database authentication. Loaded from the `USER` environment variable.
+</ParamField>
+
+**Environment variable**: `USER`
+
+### password
+
+Database password for authentication.
+
+```python
+password = os.getenv("PASSWORD")
+```
+
+<ParamField path="password" type="str">
+  PostgreSQL password for database authentication. Loaded from the `PASSWORD` environment variable. Keep this value secure and never commit it to version control.
+</ParamField>
+
+**Environment variable**: `PASSWORD`
+
+**Database connection usage**:
+```python
+from config import host, dbname, port, user, password
+import psycopg
+
+with psycopg.connect(
+    host=host,
+    dbname=dbname,
+    port=port,
+    user=user,
+    password=password
+) as conn:
+    # Perform database operations
+    pass
+```
+
+## Cities configuration
+
+### cities
+
+List of Indian cities to fetch weather data for.
+
+```python
+cities = ["Chennai", "Bangalore", "Hyderabad", "Mumbai", "Delhi"]
+```
+
+<ParamField path="cities" type="list[str]">
+  List of city names to process in the ETL pipeline. Each city name must be recognized by the OpenWeatherMap API.
+  
+  Default cities:
+  - Chennai
+  - Bangalore
+  - Hyderabad
+  - Mumbai
+  - Delhi
+</ParamField>
+
+**Usage**:
+```python
+from config import cities
+from extract import fetch_weather_data
+
+# Fetch weather data for all configured cities
+weather_data = fetch_weather_data(cities=cities)
+```
+
+**Customization**: To add or remove cities, modify the list directly in the config.py file or override it in your application code.
+
+## Example .env file
+
+Create a `.env` file in your project root with the following structure:
+
+```bash
+# OpenWeatherMap API
+API_KEY=your_openweathermap_api_key_here
+
+# PostgreSQL Database
+HOST_NAME=localhost
+DBNAME=weather_db
+PORT=5432
+USER=postgres
+PASSWORD=your_secure_password_here
+```
+
+## Security best practices
+
+- Never commit the `.env` file to version control
+- Add `.env` to your `.gitignore` file
+- Use strong, unique passwords for database access
+- Rotate API keys and credentials regularly
+- Use environment-specific configuration for development, staging, and production
+- Consider using secret management services (AWS Secrets Manager, Azure Key Vault) for production deployments
+
+## Implementation details
+
+- Source code location: `/home/daytona/workspace/source/src/config.py`
+- All configuration is loaded at module import time
+- Environment variables must be set before importing the config module

@@ -1,0 +1,191 @@
+---
+title: Weather Microbatch ETL Pipeline
+description: Production-ready ETL pipeline for extracting weather data from OpenWeather API, transforming it, and loading into PostgreSQL with idempotent design
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="Weather ETL Pipeline"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="Weather ETL Pipeline"
+/>
+
+## Overview
+
+The Weather Microbatch ETL Pipeline is an end-to-end **production-style microbatch ETL system** that demonstrates real-world data engineering patterns. It extracts weather data from the OpenWeather API, transforms it into analytics-ready format, and loads it into a PostgreSQL data warehouse using an idempotent, retry-safe design.
+
+The pipeline is built with Python and PostgreSQL, designed for 15-minute microbatch intervals, and structured to support orchestration with Apache Airflow and containerization with Docker.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card
+    title="Idempotent loading"
+    icon="arrows-rotate"
+  >
+    Retry-safe operations using `ON CONFLICT DO NOTHING` to prevent duplicate data insertion
+  </Card>
+  <Card
+    title="Exponential retry logic"
+    icon="clock-rotate-left"
+  >
+    Automatic retry with exponential backoff for both API calls and database operations using Tenacity
+  </Card>
+  <Card
+    title="Star schema modeling"
+    icon="star"
+  >
+    Dimension and fact table design with proper foreign key relationships and referential integrity
+  </Card>
+  <Card
+    title="Centralized logging"
+    icon="file-lines"
+  >
+    Comprehensive logging at every pipeline stage for observability and debugging
+  </Card>
+  <Card
+    title="Transaction safety"
+    icon="shield-check"
+  >
+    Database operations wrapped in transactions with proper error handling and rollback
+  </Card>
+  <Card
+    title="Event-time tracking"
+    icon="calendar-check"
+  >
+    Separates event time (when weather was recorded) from ingestion time for accurate analytics
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+The pipeline follows a classic three-layer ETL architecture:
+
+```
+┌─────────────────────┐
+│   OpenWeather API   │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│     Extract Layer    │
+│  - Retry logic       │
+│  - Timeout handling  │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│   Transform Layer    │
+│  - Kelvin → Celsius  │
+│  - Timestamp parsing │
+│  - Data normalization│
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│     Load Layer       │
+│  - FK resolution     │
+│  - Idempotent insert │
+│  - Conflict handling │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│  PostgreSQL DW      │
+│  - city (dimension) │
+│  - weather (fact)   │
+└─────────────────────┘
+```
+
+### Extract layer
+
+Fetches weather data from the OpenWeather API with:
+- 5-second timeout per request
+- Up to 3 retry attempts with exponential backoff (2s min, 30s max)
+- Graceful error handling and logging
+
+See `extract.py:9-20`
+
+### Transform layer
+
+Cleans and normalizes raw API data:
+- Converts temperatures from Kelvin to Celsius
+- Parses Unix timestamps to UTC datetime objects
+- Structures data for database schema compatibility
+- Uses pandas DataFrame for efficient processing
+
+See `transform.py:6-25`
+
+### Load layer
+
+Persists data to PostgreSQL with:
+- Foreign key resolution from dimension table
+- Idempotent insert with `ON CONFLICT (city_id, recorded_at) DO NOTHING`
+- Batch loading using `executemany` for performance
+- Transaction safety with automatic rollback on errors
+
+See `load.py:8-46`
+
+## Data model
+
+The pipeline uses a star schema with one dimension table and one fact table:
+
+### City dimension table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `city_id` | `BIGINT` | Primary key |
+| `city_name` | `VARCHAR` | Unique city name |
+| `latitude` | `DOUBLE PRECISION` | City latitude |
+| `longitude` | `DOUBLE PRECISION` | City longitude |
+
+**Constraints:** Unique constraint on `city_name`
+
+### Weather fact table
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `weather_id` | `BIGINT` | Primary key |
+| `city_id` | `BIGINT` | Foreign key to `city.city_id` |
+| `weather_description` | `VARCHAR` | Weather condition (e.g., "Clear", "Rain") |
+| `temperature_c` | `DOUBLE PRECISION` | Temperature in Celsius |
+| `temperature_feels_like_c` | `DOUBLE PRECISION` | Feels-like temperature in Celsius |
+| `humidity_percentage` | `INTEGER` | Humidity percentage |
+| `pressure_hpa` | `INTEGER` | Atmospheric pressure in hPa |
+| `wind_speed` | `DOUBLE PRECISION` | Wind speed in m/s |
+| `recorded_at` | `TIMESTAMPTZ` | When the weather was recorded (event time) |
+| `ingested_at` | `TIMESTAMPTZ` | When the data was loaded (defaults to current timestamp) |
+
+**Constraints:** 
+- Unique constraint on `(city_id, recorded_at)` ensures idempotency
+- Foreign key relationship enforces referential integrity
+
+<Note>
+The `UNIQUE (city_id, recorded_at)` constraint is critical for idempotency. If the same weather reading is inserted multiple times, the `ON CONFLICT DO NOTHING` clause prevents duplicates.
+</Note>
+
+## Get started
+
+<CardGroup cols={3}>
+  <Card
+    title="Quickstart"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Get the pipeline running in minutes with installation and configuration steps
+  </Card>
+  <Card
+    title="Architecture"
+    icon="diagram-project"
+    href="/architecture/overview"
+  >
+    Deep dive into the ETL layers, retry logic, and design patterns
+  </Card>
+  <Card
+    title="Components"
+    icon="puzzle-piece"
+    href="/components/extract"
+  >
+    Explore each module: extract, transform, load, and configuration
+  </Card>
+</CardGroup>

@@ -1,0 +1,134 @@
+---
+title: Load module
+description: Functions for loading transformed weather data into PostgreSQL database with automatic retry logic
+---
+
+The load module handles the loading of cleaned weather data into a PostgreSQL database. It includes automatic retry logic, city ID mapping, and duplicate prevention.
+
+## load_weather_data
+
+Loads transformed weather data into the PostgreSQL database with automatic retry logic.
+
+```python
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+def load_weather_data(cleaned_data)
+```
+
+### Retry decorator
+
+This function is decorated with `@retry` from the tenacity library:
+
+- **Maximum attempts**: 3
+- **Wait strategy**: Exponential backoff with multiplier=1, minimum 1 second, maximum 10 seconds
+- **Behavior**: Automatically retries failed database operations with increasing wait times between attempts
+
+### Parameters
+
+<ParamField path="cleaned_data" type="pandas.DataFrame" required>
+  DataFrame containing cleaned weather data from the `transform_weather_data()` function. Must contain the following columns:
+  - `city` (str): City name for mapping to city_id
+  - `weather_description` (str): Weather condition description
+  - `temp_c` (float): Temperature in Celsius
+  - `temp_feels_like_c` (float): Feels-like temperature in Celsius
+  - `humidity_percentage` (int): Humidity percentage
+  - `pressure_hpa` (int): Atmospheric pressure
+  - `wind_speed` (float): Wind speed in m/s
+  - `recorded_at` (datetime): Recording timestamp
+</ParamField>
+
+### Returns
+
+This function does not return a value. It performs database operations and logs the results.
+
+### Raises
+
+- **Exception**: Re-raises any exception encountered during database operations after logging. The retry decorator will attempt to retry the operation up to 3 times before propagating the exception.
+
+### Database operations
+
+The function performs the following operations in sequence:
+
+1. **Establish connection**: Connects to PostgreSQL using configuration parameters (host, dbname, port, user, password)
+2. **Fetch city mappings**: Executes `SELECT city_name, city_id FROM city;` to retrieve city ID mappings
+3. **Map city IDs**: Replaces city names with corresponding city_id values from the database
+4. **Reorder columns**: Drops the city column and reorders remaining columns to match the database schema
+5. **Convert to tuples**: Transforms DataFrame rows into tuples for batch insertion
+6. **Batch insert**: Uses `executemany()` to insert all records efficiently
+7. **Handle duplicates**: Uses `ON CONFLICT (city_id, recorded_at) DO NOTHING` to prevent duplicate entries
+
+### Column mapping
+
+The function maps DataFrame columns to database columns:
+
+| DataFrame Column | Database Column |
+|------------------|------------------|
+| `city_id` (mapped from city) | `city_id` |
+| `weather_description` | `weather_description` |
+| `temp_c` | `temperature_c` |
+| `temp_feels_like_c` | `temperature_feels_like_c` |
+| `humidity_percentage` | `humidity_percentage` |
+| `pressure_hpa` | `pressure_hpa` |
+| `wind_speed` | `wind_speed` |
+| `recorded_at` | `recorded_at` |
+
+### Error handling
+
+- Uses context managers (`with` statements) for automatic connection and cursor cleanup
+- Logs all exceptions with full stack trace using `logger.exception()`
+- Re-raises exceptions after logging for upstream handling
+- Retry decorator handles transient database connection issues
+- `ON CONFLICT` clause prevents unique constraint violations
+
+### Example usage
+
+```python
+from extract import fetch_weather_data
+from transform import transform_weather_data
+from load import load_weather_data
+from config import cities
+
+# Extract and transform data
+weather_data = fetch_weather_data(cities=cities)
+cleaned_data = transform_weather_data(weather_data=weather_data)
+
+# Load into database
+try:
+    load_weather_data(cleaned_data=cleaned_data)
+    print("Weather data loaded successfully")
+except Exception as e:
+    print(f"Failed to load weather data: {e}")
+```
+
+### Database schema requirements
+
+The function expects the following database schema:
+
+**city table**:
+```sql
+CREATE TABLE city (
+    city_id INTEGER PRIMARY KEY,
+    city_name VARCHAR
+);
+```
+
+**weather table**:
+```sql
+CREATE TABLE weather (
+    city_id INTEGER REFERENCES city(city_id),
+    weather_description VARCHAR,
+    temperature_c DECIMAL,
+    temperature_feels_like_c DECIMAL,
+    humidity_percentage INTEGER,
+    pressure_hpa INTEGER,
+    wind_speed DECIMAL,
+    recorded_at TIMESTAMP,
+    UNIQUE(city_id, recorded_at)
+);
+```
+
+### Implementation details
+
+- Uses psycopg3 (psycopg) for PostgreSQL connectivity
+- Implements connection pooling through context managers
+- Logs number of rows inserted for monitoring
+- Source code location: `/home/daytona/workspace/source/src/load.py:9`

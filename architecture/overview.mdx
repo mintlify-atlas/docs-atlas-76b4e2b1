@@ -1,0 +1,228 @@
+---
+title: Architecture overview
+description: Learn about the Weather Microbatch ETL Pipeline architecture, data flow, and component interactions
+---
+
+The Weather Microbatch ETL Pipeline is a production-style data pipeline that extracts weather data from the OpenWeather API, transforms it into analytics-ready format, and loads it into a PostgreSQL data warehouse.
+
+## Pipeline architecture
+
+The pipeline follows a classic ETL (Extract, Transform, Load) architecture with clear separation of concerns:
+
+```
+┌─────────────────────┐
+│   OpenWeather API   │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│     Extract Layer    │
+│  - Retry logic       │
+│  - Timeout handling  │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│   Transform Layer    │
+│  - Kelvin → Celsius  │
+│  - Timestamp parsing │
+│  - Data normalization│
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│     Load Layer       │
+│  - FK resolution     │
+│  - Idempotent insert │
+│  - Conflict handling │
+└──────────┬──────────┘
+           ↓
+┌─────────────────────┐
+│  PostgreSQL DW      │
+│  - city (dimension) │
+│  - weather (fact)   │
+└─────────────────────┘
+```
+
+## Core components
+
+### Main orchestrator
+
+The pipeline orchestrator (`main.py:12-16`) coordinates the entire ETL process:
+
+```python
+weather_data = fetch_weather_data(cities=cities)
+cleaned_data = transform_weather_data(weather_data=weather_data)
+load_weather_data(cleaned_data=cleaned_data)
+```
+
+Each stage is executed sequentially, with logging at every step to track pipeline progress.
+
+### Extract layer
+
+The extract layer (`extract.py`) handles API data ingestion with robust error handling:
+
+**Key features:**
+- **Retry logic**: Uses exponential backoff with Tenacity (`extract.py:9`)
+- **Timeout handling**: 5-second request timeout to prevent hanging (`extract.py:14`)
+- **Error isolation**: Failures for individual cities don't stop the entire pipeline (`extract.py:33-35`)
+
+```python
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
+def fetch_city_weather_data(city):
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}"
+    response = requests.get(url, timeout=5)
+    response.raise_for_status()
+    return response.json()
+```
+
+<Note>
+  The pipeline continues processing even if some cities fail, ensuring partial data availability.
+</Note>
+
+### Transform layer
+
+The transform layer (`transform.py`) normalizes raw API data into analytics-ready format:
+
+**Transformations applied:**
+- **Temperature conversion**: Kelvin to Celsius with 2 decimal precision (`transform.py:15-16`)
+- **Timestamp parsing**: Unix timestamp to UTC datetime (`transform.py:20`)
+- **Data structuring**: Nested JSON to flat tabular format (`transform.py:12-21`)
+- **Column naming**: API fields mapped to warehouse column names
+
+```python
+records.append({
+    'city': data['name'],
+    'weather_description': data['weather'][0]['main'],
+    'temp_c': round((data['main']['temp']) - 273.15, 2),
+    'temp_feels_like_c': round((data['main']['feels_like']) - 273.15, 2),
+    'humidity_percentage': data['main']['humidity'],
+    'pressure_hpa': data['main']['pressure'],
+    'wind_speed': round(data['wind']['speed'], 2),
+    'recorded_at': pd.to_datetime(data['dt'], utc=True, unit='s')
+})
+```
+
+### Load layer
+
+The load layer consists of two components:
+
+#### City dimension loader
+
+The `load_cities.py` module populates the dimension table:
+
+```python
+insert_query = """INSERT INTO city(city_name, latitude, longitude) 
+                  VALUES(%s, %s, %s) 
+                  ON CONFLICT (city_name) DO NOTHING;"""
+```
+
+#### Weather fact loader
+
+The `load.py` module handles the main data loading process:
+
+1. **Foreign key resolution**: Maps city names to `city_id` from dimension table (`load.py:15-19`)
+2. **Data preparation**: Reorders columns to match table schema (`load.py:23-32`)
+3. **Idempotent insert**: Uses `ON CONFLICT` to prevent duplicates (`load.py:35-38`)
+
+```python
+insert_query = """INSERT INTO weather(
+    city_id, weather_description, temperature_c, 
+    temperature_feels_like_c, humidity_percentage, 
+    pressure_hpa, wind_speed, recorded_at
+) VALUES(%s, %s, %s, %s, %s, %s, %s, %s) 
+ON CONFLICT (city_id, recorded_at) DO NOTHING;"""
+```
+
+<Warning>
+  The load layer assumes the city dimension table is already populated. Run city initialization before the main pipeline.
+</Warning>
+
+## Component interactions
+
+### Data flow
+
+1. **Configuration loading**: Environment variables and city list loaded from `config.py`
+2. **API extraction**: For each city, fetch current weather data with retries
+3. **Data transformation**: Convert units, parse timestamps, flatten structure
+4. **FK resolution**: Query city dimension to get `city_id` mappings
+5. **Batch insert**: Load all weather records in a single transaction
+6. **Conflict handling**: Skip duplicate records based on `(city_id, recorded_at)` uniqueness
+
+### Database transactions
+
+Both loaders use PostgreSQL connection context managers (`psycopg.connect`) to ensure:
+
+- **Automatic commits**: Successful operations are committed
+- **Automatic rollbacks**: Failures trigger transaction rollback
+- **Connection cleanup**: Resources are properly released
+
+```python
+with psycopg.connect(host=host, dbname=dbname, port=port, 
+                     user=user, password=password) as conn:
+    with conn.cursor() as cur:
+        cur.executemany(insert_query, cleaned_data)
+```
+
+## Reliability features
+
+### Retry mechanism
+
+Both extract and load layers implement exponential backoff:
+
+- **Extract**: 3 attempts, 2-30 second wait (`extract.py:9`)
+- **Load**: 3 attempts, 1-10 second wait (`load.py:8`, `load_cities.py:8`)
+
+### Error handling
+
+- **Per-city isolation**: Extract failures don't stop processing other cities
+- **Exception logging**: All errors logged with full stack traces
+- **Graceful degradation**: Pipeline completes with available data
+
+### Idempotency
+
+The pipeline can be safely re-run multiple times:
+
+- **City dimension**: `ON CONFLICT (city_name) DO NOTHING` prevents duplicates
+- **Weather fact**: `ON CONFLICT (city_id, recorded_at) DO NOTHING` ensures single record per city per timestamp
+
+See [Idempotency](/architecture/idempotency) for detailed implementation.
+
+## Configuration management
+
+The pipeline uses environment variables for sensitive credentials (`config.py:1-12`):
+
+- `API_KEY`: OpenWeather API authentication
+- `HOST_NAME`, `DBNAME`, `PORT`: PostgreSQL connection details
+- `USER`, `PASSWORD`: Database credentials
+
+<Note>
+  All configuration is loaded from a `.env` file at runtime, keeping secrets out of source code.
+</Note>
+
+The city list is defined in code (`config.py:14`):
+
+```python
+cities = ["Chennai", "Bangalore", "Hyderabad", "Mumbai", "Delhi"]
+```
+
+## Logging strategy
+
+Centralized logging tracks pipeline execution:
+
+- **Module-level loggers**: Each component has its own logger
+- **Structured messages**: Start/finish markers for each stage
+- **Debug information**: Retry attempts logged at DEBUG level
+- **Exception tracking**: Full stack traces captured with `logger.exception()`
+
+Example log flow:
+
+```
+ETL pipeline started
+Weather data extraction started
+Weather data for city Chennai extracted successfully
+...
+Weather data transformation started
+Weather data transformation finished successfully
+Weather data loading started
+Inserted 5 rows into database
+Weather data loading finished successfully
+ETL pipeline finished
+```

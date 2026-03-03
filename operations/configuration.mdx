@@ -1,0 +1,185 @@
+---
+title: Configuration
+description: Learn how to configure the Weather Microbatch ETL Pipeline with environment variables, API keys, and database connections
+---
+
+The Weather Microbatch ETL Pipeline uses environment variables and a centralized configuration module to manage all runtime settings.
+
+## Environment setup
+
+The pipeline uses `python-dotenv` to load configuration from a `.env` file, keeping sensitive credentials out of source control.
+
+### Configuration module
+
+All configuration is centralized in `config.py:1-14`:
+
+```python config.py
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY")
+
+host = os.getenv("HOST_NAME")
+dbname = os.getenv("DBNAME")
+port = os.getenv("PORT")
+user = os.getenv("USER")
+password = os.getenv("PASSWORD")
+
+cities = ["Chennai", "Bangalore", "Hyderabad", "Mumbai", "Delhi"]
+```
+
+## Required environment variables
+
+<Steps>
+  <Step title="Create .env file">
+    Create a `.env` file in your project root directory (same level as `src/`).
+  </Step>
+  
+  <Step title="Add API credentials">
+    Configure your OpenWeather API key:
+    
+    ```bash .env
+    API_KEY=your_openweather_api_key
+    ```
+    
+    <Info>
+      Get your free API key from [OpenWeather](https://openweathermap.org/api). The free tier allows 60 calls/minute, which is sufficient for this microbatch pipeline.
+    </Info>
+  </Step>
+  
+  <Step title="Add database credentials">
+    Configure your PostgreSQL connection parameters:
+    
+    ```bash .env
+    HOST_NAME=your_host_name
+    DBNAME=your_dbname
+    PORT=5432
+    USER=your_user_name
+    PASSWORD=your_password
+    ```
+  </Step>
+</Steps>
+
+### Complete .env template
+
+```bash .env
+# OpenWeather API Configuration
+API_KEY=your_openweather_api_key
+
+# PostgreSQL Database Configuration
+HOST_NAME=localhost
+DBNAME=weather_db
+PORT=5432
+USER=postgres
+PASSWORD=your_secure_password
+```
+
+<Warning>
+  Never commit your `.env` file to version control. Ensure it's listed in your `.gitignore` file.
+</Warning>
+
+## Configuration components
+
+### API configuration
+
+The `API_KEY` variable is used in the extraction layer (`extract.py:4`) to authenticate requests to the OpenWeather API:
+
+```python extract.py
+from config import API_KEY
+
+url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}"
+```
+
+### Database configuration
+
+Database connection parameters are used in the load layer (`load.py:4`) to establish PostgreSQL connections:
+
+```python load.py
+from config import host, dbname, port, user, password
+
+with psycopg.connect(host=host, dbname=dbname, port=port, user=user, password=password) as conn:
+    # Database operations
+```
+
+### City configuration
+
+The `cities` list in `config.py:14` defines which cities to fetch weather data for:
+
+```python config.py
+cities = ["Chennai", "Bangalore", "Hyderabad", "Mumbai", "Delhi"]
+```
+
+<Info>
+  To monitor different cities, simply modify this list. Ensure the cities are pre-loaded in your `city` dimension table using `load_cities.py`.
+</Info>
+
+## Configuration best practices
+
+<CardGroup cols={2}>
+  <Card title="Security" icon="lock">
+    - Never hardcode credentials
+    - Use `.env` for local development
+    - Use secrets management for production
+    - Rotate API keys regularly
+  </Card>
+  
+  <Card title="Environment separation" icon="layer-group">
+    - Use different `.env` files per environment
+    - Example: `.env.dev`, `.env.staging`, `.env.prod`
+    - Load appropriate file based on environment variable
+  </Card>
+  
+  <Card title="Validation" icon="check-circle">
+    - Validate all required variables are set on startup
+    - Fail fast if configuration is incomplete
+    - Log configuration errors clearly
+  </Card>
+  
+  <Card title="Documentation" icon="book">
+    - Maintain a `.env.example` template
+    - Document each variable's purpose
+    - Include example values (non-sensitive)
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Missing environment variables
+
+If environment variables are not loaded, the pipeline will fail with `NoneType` errors. Verify:
+
+1. `.env` file exists in the correct location
+2. Variable names match exactly (case-sensitive)
+3. No extra whitespace around `=` signs
+4. `python-dotenv` is installed
+
+### Database connection issues
+
+<AccordionGroup>
+  <Accordion title="Connection refused">
+    - Verify `HOST_NAME` and `PORT` are correct
+    - Ensure PostgreSQL service is running
+    - Check firewall rules allow connections
+  </Accordion>
+  
+  <Accordion title="Authentication failed">
+    - Verify `USER` and `PASSWORD` credentials
+    - Check user has necessary database permissions
+    - Confirm database `DBNAME` exists
+  </Accordion>
+  
+  <Accordion title="SSL/TLS errors">
+    - Add SSL mode to connection string if required
+    - For development, you may need `sslmode=disable`
+  </Accordion>
+</AccordionGroup>
+
+### API authentication errors
+
+If you receive 401 errors from OpenWeather API:
+
+- Verify your `API_KEY` is active and valid
+- Check you haven't exceeded rate limits (60 calls/minute for free tier)
+- Ensure no extra quotes or whitespace in the key value

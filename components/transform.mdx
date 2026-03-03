@@ -1,0 +1,194 @@
+---
+title: Transform
+description: Transform raw weather data into a structured format with temperature conversion and timestamp parsing
+---
+
+The transformation component converts raw JSON data from the OpenWeather API into a clean, structured pandas DataFrame ready for database loading.
+
+## Overview
+
+The `transform.py` module provides a single transformation function that:
+
+- Extracts relevant fields from nested JSON structures
+- Converts temperatures from Kelvin to Celsius
+- Parses Unix timestamps into UTC datetime objects
+- Rounds numerical values to appropriate precision
+- Returns a structured pandas DataFrame
+
+## Function signature
+
+```python transform.py:6-25
+def transform_weather_data(weather_data):
+    logger.info("Weather data transformation started")
+
+    records = []
+
+    for data in weather_data:
+        records.append({
+            'city':data['name'],
+            'weather_description':data['weather'][0]['main'],
+            'temp_c':round((data['main']['temp']) - 273.15, 2),
+            'temp_feels_like_c':round((data['main']['feels_like']) - 273.15, 2),
+            'humidity_percentage':data['main']['humidity'],
+            'pressure_hpa':data['main']['pressure'],
+            'wind_speed':round(data['wind']['speed'], 2),
+            'recorded_at':pd.to_datetime(data['dt'], utc=True, unit='s')
+        })
+
+    logger.info("Weather data transformation finished successfully")
+
+    return pd.DataFrame(records)
+```
+
+## Data transformations
+
+The function performs several key transformations on the raw API data:
+
+### Temperature conversion
+
+<Note>
+The OpenWeather API returns temperatures in Kelvin by default. The transformation converts these to Celsius using the formula: `°C = K - 273.15`
+</Note>
+
+```python
+temp_c = round((data['main']['temp']) - 273.15, 2)
+temp_feels_like_c = round((data['main']['feels_like']) - 273.15, 2)
+```
+
+Both actual and "feels like" temperatures are:
+- Converted from Kelvin to Celsius
+- Rounded to 2 decimal places for storage efficiency
+
+### Timestamp parsing
+
+```python
+recorded_at = pd.to_datetime(data['dt'], utc=True, unit='s')
+```
+
+The Unix timestamp from the API is converted to a pandas datetime object:
+- `unit='s'` - Interprets the value as seconds since epoch
+- `utc=True` - Ensures timezone-aware UTC datetime
+
+### Field extraction
+
+Data is extracted from nested JSON structures:
+
+| Output Field | Source Path | Transformation |
+|--------------|-------------|----------------|
+| `city` | `data['name']` | None |
+| `weather_description` | `data['weather'][0]['main']` | First weather condition |
+| `temp_c` | `data['main']['temp']` | Kelvin to Celsius, rounded |
+| `temp_feels_like_c` | `data['main']['feels_like']` | Kelvin to Celsius, rounded |
+| `humidity_percentage` | `data['main']['humidity']` | None |
+| `pressure_hpa` | `data['main']['pressure']` | None |
+| `wind_speed` | `data['wind']['speed']` | Rounded to 2 decimals |
+| `recorded_at` | `data['dt']` | Unix to UTC datetime |
+
+## Output schema
+
+The transformation returns a pandas DataFrame with the following schema:
+
+<CodeGroup>
+```python Schema
+DataFrame(
+    city: str,
+    weather_description: str,
+    temp_c: float,
+    temp_feels_like_c: float,
+    humidity_percentage: int,
+    pressure_hpa: int,
+    wind_speed: float,
+    recorded_at: datetime64[ns, UTC]
+)
+```
+
+```python Example Output
+         city weather_description  temp_c  temp_feels_like_c  humidity_percentage  pressure_hpa  wind_speed              recorded_at
+0      London               Clouds   12.45              11.23                   76          1013        4.12  2024-03-15 14:30:00+00:00
+1    New York                Clear   18.34              17.89                   45          1015        3.50  2024-03-15 14:30:00+00:00
+2       Tokyo                 Rain    8.90               7.45                   88          1008        6.75  2024-03-15 14:30:00+00:00
+```
+</CodeGroup>
+
+## Numerical precision
+
+The transformation applies appropriate rounding for different data types:
+
+<Steps>
+  <Step title="Temperature values">
+    Rounded to **2 decimal places** (e.g., 12.45°C) for a balance between precision and storage efficiency.
+  </Step>
+  
+  <Step title="Wind speed">
+    Rounded to **2 decimal places** (e.g., 4.12 m/s) to match meteorological standards.
+  </Step>
+  
+  <Step title="Humidity and pressure">
+    No rounding applied as these are already integers from the API.
+  </Step>
+</Steps>
+
+## Weather description extraction
+
+```python
+weather_description = data['weather'][0]['main']
+```
+
+<Warning>
+The transformation extracts only the first weather condition from the `weather` array. If multiple conditions exist, only the primary one is captured.
+</Warning>
+
+Common weather descriptions include:
+- Clear
+- Clouds
+- Rain
+- Snow
+- Thunderstorm
+- Drizzle
+- Mist
+
+## Error handling
+
+The transformation function assumes well-formed input data from the extraction phase. Key assumptions:
+
+- The `weather` array contains at least one element
+- All required fields exist in the nested JSON structure
+- Temperature values are valid numbers
+- Timestamps are valid Unix epoch values
+
+<Note>
+Data validation and error handling occur in the extraction phase. The transformation phase assumes clean input data.
+</Note>
+
+## Logging
+
+```python transform.py:4
+logger = logging.getLogger(__name__)
+```
+
+The transformation process logs:
+- `INFO` - Transformation started
+- `INFO` - Transformation finished successfully
+
+## Usage example
+
+```python
+from extract import fetch_weather_data
+from transform import transform_weather_data
+
+# Extract raw data
+cities = ["London", "New York", "Tokyo"]
+raw_data = fetch_weather_data(cities)
+
+# Transform to DataFrame
+df = transform_weather_data(raw_data)
+
+print(df.head())
+print(f"\nDataFrame shape: {df.shape}")
+print(f"Columns: {list(df.columns)}")
+```
+
+## Dependencies
+
+- `pandas` - DataFrame creation and datetime parsing
+- `logging` - Standard Python logging

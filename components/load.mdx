@@ -1,0 +1,316 @@
+---
+title: Load
+description: Load transformed weather data into PostgreSQL with foreign key resolution and conflict handling
+---
+
+The load component inserts transformed weather data into a PostgreSQL database with automatic foreign key resolution, conflict handling, and retry logic.
+
+## Overview
+
+The `load.py` module provides a single function that:
+
+- Connects to PostgreSQL database
+- Resolves city names to foreign key IDs
+- Handles duplicate records with conflict resolution
+- Implements retry logic for transient failures
+- Performs batch inserts for efficiency
+
+## Function signature
+
+```python load.py:8-46
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+def load_weather_data(cleaned_data):
+    logger.info("Weather data loading started")
+
+    try:
+        with psycopg.connect(host=host, dbname=dbname, port=port, user=user, password=password) as conn:
+            with conn.cursor() as cur:
+                select_query = "SELECT city_name, city_id FROM city;"
+                cur.execute(select_query)
+                
+                rows = cur.fetchall()
+                city_id = {city_name: city_id for city_name, city_id in rows}
+                
+                cleaned_data['city_id'] = cleaned_data['city'].map(city_id)
+                cleaned_data = cleaned_data.drop(columns = ['city'])
+                cleaned_data = cleaned_data[[
+                    'city_id',
+                    'weather_description',
+                    'temp_c',
+                    'temp_feels_like_c',
+                    'humidity_percentage',
+                    'pressure_hpa',
+                    'wind_speed',
+                    'recorded_at'
+                ]]
+                cleaned_data = list(cleaned_data.itertuples(index = False, name = None))
+
+                insert_query = """
+                INSERT INTO weather(city_id, weather_description, temperature_c, temperature_feels_like_c, humidity_percentage, pressure_hpa, wind_speed, recorded_at)
+                VALUES(%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (city_id, recorded_at) DO NOTHING;
+                """
+                cur.executemany(insert_query, cleaned_data)
+
+                logger.info(f"Inserted {len(cleaned_data)} rows into database")
+    except Exception as e:
+        logger.exception(e)
+        raise e
+    
+    logger.info("Weather data loading finished successfully")
+```
+
+## Foreign key resolution
+
+The load process resolves city names to foreign key IDs from the `city` table:
+
+<Steps>
+  <Step title="Query city lookup table">
+    ```python load.py:15-16
+    select_query = "SELECT city_name, city_id FROM city;"
+    cur.execute(select_query)
+    ```
+    Retrieves all city names and their corresponding IDs from the database.
+  </Step>
+  
+  <Step title="Create mapping dictionary">
+    ```python load.py:18-19
+    rows = cur.fetchall()
+    city_id = {city_name: city_id for city_name, city_id in rows}
+    ```
+    Builds an in-memory dictionary for efficient lookups: `{"London": 1, "New York": 2, ...}`
+  </Step>
+  
+  <Step title="Map city names to IDs">
+    ```python load.py:21
+    cleaned_data['city_id'] = cleaned_data['city'].map(city_id)
+    ```
+    Uses pandas `map()` to replace city names with foreign key IDs.
+  </Step>
+  
+  <Step title="Remove city name column">
+    ```python load.py:22
+    cleaned_data = cleaned_data.drop(columns = ['city'])
+    ```
+    Drops the city name column as it's no longer needed.
+  </Step>
+</Steps>
+
+<Note>
+The city table must be pre-populated with all cities before the ETL pipeline runs. Cities not found in the lookup table will have NULL city_id values.
+</Note>
+
+## Column reordering
+
+Before insertion, columns are reordered to match the database schema:
+
+```python load.py:23-32
+cleaned_data = cleaned_data[[
+    'city_id',
+    'weather_description',
+    'temp_c',
+    'temp_feels_like_c',
+    'humidity_percentage',
+    'pressure_hpa',
+    'wind_speed',
+    'recorded_at'
+]]
+```
+
+This ensures the column order matches the INSERT statement's VALUES clause.
+
+## Batch insertion
+
+The module uses `executemany()` for efficient batch insertion:
+
+```python load.py:33
+cleaned_data = list(cleaned_data.itertuples(index=False, name=None))
+```
+
+This converts the DataFrame to a list of tuples, each representing a row:
+
+```python
+[(1, 'Clouds', 12.45, 11.23, 76, 1013, 4.12, datetime(...)),
+ (2, 'Clear', 18.34, 17.89, 45, 1015, 3.50, datetime(...)),
+ ...]
+```
+
+## SQL insertion query
+
+```sql load.py:35-38
+INSERT INTO weather(
+    city_id, 
+    weather_description, 
+    temperature_c, 
+    temperature_feels_like_c, 
+    humidity_percentage, 
+    pressure_hpa, 
+    wind_speed, 
+    recorded_at
+)
+VALUES(%s, %s, %s, %s, %s, %s, %s, %s) 
+ON CONFLICT (city_id, recorded_at) DO NOTHING;
+```
+
+### Conflict handling
+
+<Warning>
+The `ON CONFLICT (city_id, recorded_at) DO NOTHING` clause prevents duplicate entries. If a record with the same city and timestamp already exists, the new record is silently ignored.
+</Warning>
+
+This conflict resolution strategy:
+- Assumes a composite unique constraint on `(city_id, recorded_at)`
+- Prevents duplicate weather readings for the same city at the same time
+- Allows the pipeline to be safely re-run without creating duplicates
+- Does not update existing records (idempotent inserts only)
+
+## Retry logic
+
+The load function implements automatic retry with exponential backoff:
+
+```python load.py:8
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+```
+
+### Retry configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `stop` | `stop_after_attempt(3)` | Maximum 3 attempts |
+| `wait` | `wait_exponential(multiplier=1, min=1, max=10)` | Exponential backoff |
+| `min` wait | 1 second | Minimum wait between retries |
+| `max` wait | 10 seconds | Maximum wait between retries |
+
+### Retry timeline
+
+<Steps>
+  <Step title="Initial attempt">
+    First database connection and insertion attempt.
+  </Step>
+  
+  <Step title="First retry (if needed)">
+    After 1 second, second attempt is made.
+  </Step>
+  
+  <Step title="Second retry (if needed)">
+    After 2 seconds, third and final attempt is made.
+  </Step>
+  
+  <Step title="Failure">
+    If all attempts fail, the exception is logged and re-raised.
+  </Step>
+</Steps>
+
+## Database connection
+
+The module uses `psycopg` (version 3) for PostgreSQL connectivity:
+
+```python load.py:13
+with psycopg.connect(host=host, dbname=dbname, port=port, user=user, password=password) as conn:
+    with conn.cursor() as cur:
+        # Database operations
+```
+
+### Connection parameters
+
+Connection details are imported from the configuration module:
+
+- `host` - Database server hostname
+- `dbname` - Database name
+- `port` - PostgreSQL port (typically 5432)
+- `user` - Database username
+- `password` - Database password
+
+### Context managers
+
+The code uses nested context managers for automatic resource cleanup:
+- Outer `with` - Automatically commits transaction and closes connection
+- Inner `with` - Automatically closes cursor
+
+<Note>
+No explicit `commit()` call is needed. The connection context manager automatically commits on successful exit.
+</Note>
+
+## Error handling
+
+```python load.py:42-44
+except Exception as e:
+    logger.exception(e)
+    raise e
+```
+
+All exceptions are:
+1. Logged with full stack trace via `logger.exception()`
+2. Re-raised to trigger retry logic or fail the pipeline
+
+## Logging
+
+The load process provides detailed logging:
+
+```python load.py:6
+logger = logging.getLogger(__name__)
+```
+
+### Log messages
+
+- `INFO` - Loading started
+- `INFO` - Number of rows inserted
+- `INFO` - Loading finished successfully
+- `EXCEPTION` - Full error details on failure
+
+## Database schema requirements
+
+The load function assumes the following database schema:
+
+### city table
+
+```sql
+CREATE TABLE city (
+    city_id SERIAL PRIMARY KEY,
+    city_name VARCHAR(100) UNIQUE NOT NULL
+);
+```
+
+### weather table
+
+```sql
+CREATE TABLE weather (
+    weather_id SERIAL PRIMARY KEY,
+    city_id INTEGER REFERENCES city(city_id),
+    weather_description VARCHAR(50),
+    temperature_c NUMERIC(5,2),
+    temperature_feels_like_c NUMERIC(5,2),
+    humidity_percentage INTEGER,
+    pressure_hpa INTEGER,
+    wind_speed NUMERIC(5,2),
+    recorded_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE(city_id, recorded_at)
+);
+```
+
+<Warning>
+The `UNIQUE(city_id, recorded_at)` constraint is required for the `ON CONFLICT` clause to work correctly.
+</Warning>
+
+## Usage example
+
+```python
+from extract import fetch_weather_data
+from transform import transform_weather_data
+from load import load_weather_data
+
+# Extract and transform
+cities = ["London", "New York", "Tokyo"]
+raw_data = fetch_weather_data(cities)
+df = transform_weather_data(raw_data)
+
+# Load into database
+load_weather_data(df)
+print("Weather data successfully loaded to PostgreSQL")
+```
+
+## Dependencies
+
+- `psycopg` - PostgreSQL database adapter (version 3)
+- `tenacity` - Retry library with exponential backoff
+- `logging` - Standard Python logging
+- `config` - Custom configuration module for database credentials

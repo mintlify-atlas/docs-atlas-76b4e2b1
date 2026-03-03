@@ -1,0 +1,447 @@
+---
+title: Idempotency
+description: Learn how the pipeline ensures idempotent operations using ON CONFLICT handling
+---
+
+The Weather Microbatch ETL Pipeline is designed to be **idempotent**, meaning it can be safely re-run multiple times without creating duplicate data or side effects.
+
+## Why idempotency matters
+
+In production data pipelines, idempotency is critical for:
+
+- **Safe retries**: Failures can be retried without data duplication
+- **Backfilling**: Historical data can be reprocessed without conflicts
+- **Scheduled runs**: Overlapping execution windows don't cause issues
+- **Testing**: Development and testing can use production-like patterns
+- **Recovery**: Failed runs can be restarted from any point
+
+<Note>
+  An idempotent operation produces the same result whether executed once or multiple times.
+</Note>
+
+## Implementation strategy
+
+The pipeline achieves idempotency using PostgreSQL's `ON CONFLICT` clause combined with unique constraints.
+
+### Conceptual approach
+
+Instead of:
+
+```sql
+-- Non-idempotent: creates duplicates on retry
+INSERT INTO weather VALUES (...);
+```
+
+The pipeline uses:
+
+```sql
+-- Idempotent: skips duplicates on retry
+INSERT INTO weather VALUES (...) 
+ON CONFLICT (city_id, recorded_at) DO NOTHING;
+```
+
+This pattern:
+
+1. Attempts to insert the record
+2. Detects conflicts using the unique constraint
+3. Skips the insert if a duplicate exists
+4. Continues processing remaining records
+
+## City dimension idempotency
+
+The city dimension table uses city name as the natural key.
+
+### Schema constraint
+
+```sql
+CREATE TABLE city (
+    city_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_name VARCHAR NOT NULL,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    UNIQUE (city_name)  -- Idempotency key
+);
+```
+
+The `UNIQUE (city_name)` constraint ensures each city appears only once.
+
+### Loading implementation
+
+From `load_cities.py:22`:
+
+```python
+insert_query = """INSERT INTO city(city_name, latitude, longitude) 
+                  VALUES(%s, %s, %s) 
+                  ON CONFLICT (city_name) DO NOTHING;"""
+
+cur.executemany(insert_query, records)
+```
+
+**Behavior:**
+
+- **First run**: Inserts all cities (Chennai, Bangalore, etc.)
+- **Subsequent runs**: All inserts skipped due to conflict
+- **Result**: Dimension table always contains exactly one record per city
+
+### Example scenario
+
+```python
+# First execution
+records = [
+    ('Chennai', 13.0878, 80.2785),
+    ('Bangalore', 12.9762, 77.6033)
+]
+# Result: 2 rows inserted
+
+# Second execution (same data)
+records = [
+    ('Chennai', 13.0878, 80.2785),
+    ('Bangalore', 12.9762, 77.6033)
+]
+# Result: 0 rows inserted (conflicts detected)
+
+# SELECT COUNT(*) FROM city;
+# Result: 2 (not 4)
+```
+
+<Warning>
+  The `ON CONFLICT` clause only works if a unique constraint exists on the conflict target. Without `UNIQUE (city_name)`, this pattern will fail.
+</Warning>
+
+## Weather fact idempotency
+
+The weather fact table uses a composite key of city and observation time.
+
+### Schema constraint
+
+```sql
+CREATE TABLE weather (
+    weather_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_id BIGINT NOT NULL,
+    weather_description VARCHAR NOT NULL,
+    temperature_c DOUBLE PRECISION NOT NULL,
+    temperature_feels_like_c DOUBLE PRECISION NOT NULL,
+    humidity_percentage INTEGER NOT NULL,
+    pressure_hpa INTEGER NOT NULL,
+    wind_speed DOUBLE PRECISION NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    ingested_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (city_id) REFERENCES city(city_id),
+    UNIQUE (city_id, recorded_at)  -- Idempotency key
+);
+```
+
+The `UNIQUE (city_id, recorded_at)` constraint ensures:
+
+- Each city can have only one observation per timestamp
+- The combination uniquely identifies a weather observation
+- Duplicate inserts for the same city at the same time are blocked
+
+### Loading implementation
+
+From `load.py:35-38`:
+
+```python
+insert_query = """INSERT INTO weather(
+    city_id, weather_description, temperature_c, 
+    temperature_feels_like_c, humidity_percentage, 
+    pressure_hpa, wind_speed, recorded_at
+) VALUES(%s, %s, %s, %s, %s, %s, %s, %s) 
+ON CONFLICT (city_id, recorded_at) DO NOTHING;"""
+
+cur.executemany(insert_query, cleaned_data)
+```
+
+**Behavior:**
+
+- **First run**: Inserts all weather observations
+- **Immediate retry**: All inserts skipped (same `recorded_at` timestamp)
+- **Next interval**: Only new observations inserted (different `recorded_at`)
+- **Result**: No duplicate weather records for any city at any timestamp
+
+### Example scenario
+
+```python
+# 10:00 AM - First pipeline run
+records = [
+    (1, 'Clear', 28.45, 27.80, 65, 1013, 3.5, '2026-03-03 10:00:00+00'),
+    (2, 'Clouds', 24.12, 23.50, 72, 1015, 2.1, '2026-03-03 10:00:00+00')
+]
+# Result: 2 rows inserted
+
+# 10:02 AM - Pipeline retried due to failure
+records = [
+    (1, 'Clear', 28.45, 27.80, 65, 1013, 3.5, '2026-03-03 10:00:00+00'),
+    (2, 'Clouds', 24.12, 23.50, 72, 1015, 2.1, '2026-03-03 10:00:00+00')
+]
+# Result: 0 rows inserted (conflicts on both records)
+
+# 10:15 AM - Next scheduled run (new data)
+records = [
+    (1, 'Clear', 29.10, 28.30, 62, 1013, 4.0, '2026-03-03 10:15:00+00'),
+    (2, 'Rain', 23.50, 22.80, 85, 1014, 5.5, '2026-03-03 10:15:00+00')
+]
+# Result: 2 rows inserted (different recorded_at)
+```
+
+## Why use `recorded_at` not `ingested_at`
+
+The idempotency constraint uses **event time** (`recorded_at`) rather than **system time** (`ingested_at`):
+
+```sql
+UNIQUE (city_id, recorded_at)  -- Correct
+-- NOT: UNIQUE (city_id, ingested_at)
+```
+
+### Reasoning
+
+**Event time (`recorded_at`):**
+
+- Represents when weather was actually observed
+- Extracted from API: `data['dt']`
+- Stable across retries (same API response = same timestamp)
+- Enables true idempotency
+
+**System time (`ingested_at`):**
+
+- Represents when record was loaded
+- Auto-populated: `DEFAULT CURRENT_TIMESTAMP`
+- Changes on every retry (different load time)
+- Would NOT prevent duplicates
+
+### Example of wrong approach
+
+```sql
+-- BAD: Using system time for uniqueness
+UNIQUE (city_id, ingested_at)
+```
+
+```python
+# 10:00 AM - First run
+record = (1, 'Clear', 28.45, ..., '2026-03-03 10:00:00')
+# Inserted with ingested_at = '2026-03-03 10:00:00'
+
+# 10:02 AM - Retry
+record = (1, 'Clear', 28.45, ..., '2026-03-03 10:00:00')
+# Inserted AGAIN with ingested_at = '2026-03-03 10:02:00'
+# Result: DUPLICATE DATA (different ingested_at)
+```
+
+<Warning>
+  Never use auto-generated timestamps (`DEFAULT CURRENT_TIMESTAMP`) as part of idempotency constraints. They change on every retry, defeating the purpose.
+</Warning>
+
+## Conflict handling: `DO NOTHING` vs `DO UPDATE`
+
+PostgreSQL supports two conflict resolution strategies:
+
+### `DO NOTHING` (current implementation)
+
+```sql
+ON CONFLICT (city_id, recorded_at) DO NOTHING;
+```
+
+**Behavior:**
+
+- Silently skips conflicting rows
+- No error thrown
+- No changes to existing data
+- Fast and simple
+
+**Use case:** When the source data is immutable (weather observations don't change)
+
+### `DO UPDATE` (alternative approach)
+
+```sql
+ON CONFLICT (city_id, recorded_at) 
+DO UPDATE SET
+    temperature_c = EXCLUDED.temperature_c,
+    humidity_percentage = EXCLUDED.humidity_percentage,
+    ...;
+```
+
+**Behavior:**
+
+- Updates existing row with new values
+- Allows late-arriving corrections
+- More complex logic
+
+**Use case:** When source data can be revised (e.g., corrected sensor readings)
+
+<Note>
+  The pipeline uses `DO NOTHING` because OpenWeather API data is immutable - historical observations don't change.
+</Note>
+
+## Batch idempotency
+
+The pipeline processes multiple cities in a single batch using `executemany()`:
+
+```python
+records = [
+    (1, 'Clear', 28.45, ..., '2026-03-03 10:00:00+00'),
+    (2, 'Clouds', 24.12, ..., '2026-03-03 10:00:00+00'),
+    (3, 'Rain', 22.78, ..., '2026-03-03 10:00:00+00')
+]
+
+cur.executemany(insert_query, records)
+```
+
+**Behavior:**
+
+- Each record evaluated independently
+- Some may insert (new data)
+- Others may skip (conflicts)
+- No error if some records conflict
+- Transaction commits successfully
+
+### Partial retry scenario
+
+```python
+# First run - Chennai fails mid-pipeline
+records = [
+    (1, 'Clear', 28.45, ..., '2026-03-03 10:00:00+00'),  # Inserted
+    (2, 'Clouds', 24.12, ..., '2026-03-03 10:00:00+00'), # Inserted
+    # Pipeline crashes here
+]
+
+# Retry - Full dataset including Chennai
+records = [
+    (1, 'Clear', 28.45, ..., '2026-03-03 10:00:00+00'),  # Skipped (conflict)
+    (2, 'Clouds', 24.12, ..., '2026-03-03 10:00:00+00'), # Skipped (conflict)
+    (3, 'Rain', 22.78, ..., '2026-03-03 10:00:00+00'),   # Inserted (new)
+]
+
+# Result: Only Chennai inserted on retry
+```
+
+This enables **safe partial retries** without data duplication.
+
+## Transaction safety
+
+Both loaders use PostgreSQL connection context managers:
+
+```python
+with psycopg.connect(host=host, dbname=dbname, ...) as conn:
+    with conn.cursor() as cur:
+        cur.executemany(insert_query, records)
+        # Automatic COMMIT on success
+        # Automatic ROLLBACK on exception
+```
+
+**Benefits:**
+
+- **Atomicity**: All records inserted or none
+- **Rollback on failure**: Database state unchanged if pipeline crashes
+- **No partial commits**: Either entire batch succeeds or nothing persists
+
+### Failure scenario
+
+```python
+try:
+    with psycopg.connect(...) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(insert_query, records)  # 100 records
+            # After 50 records, database crashes
+            # Transaction is ROLLED BACK
+            # 0 records persisted
+except Exception as e:
+    logger.exception(e)
+    # Safe to retry - no partial data
+```
+
+## Retry integration
+
+The load functions use Tenacity for automatic retries:
+
+```python
+@retry(stop=stop_after_attempt(3), 
+       wait=wait_exponential(multiplier=1, min=1, max=10))
+def load_weather_data(cleaned_data):
+    # Idempotent load logic
+```
+
+**Combined behavior:**
+
+1. **First attempt**: Inserts new records
+2. **Transient failure**: Database connection timeout
+3. **Automatic retry**: Same data submitted again
+4. **Conflict detection**: `ON CONFLICT` skips already-inserted records
+5. **Success**: Retry completes without duplicates
+
+<Note>
+  Idempotency makes retries safe. Without it, each retry would create duplicate records.
+</Note>
+
+## Testing idempotency
+
+You can verify idempotent behavior:
+
+```bash
+# Run pipeline
+python src/main.py
+# Check row count
+psql -c "SELECT COUNT(*) FROM weather;"
+# Result: 5 rows
+
+# Immediately re-run
+python src/main.py
+# Check row count again
+psql -c "SELECT COUNT(*) FROM weather;"
+# Result: Still 5 rows (not 10)
+
+# Check logs
+# "Inserted 0 rows into database" (all conflicts)
+```
+
+## Limitations
+
+### Update detection
+
+The current implementation cannot detect if weather data changes:
+
+```python
+# First API call
+{'dt': 1709467200, 'main': {'temp': 301.45}}  # 28.45°C
+
+# API data corrected
+{'dt': 1709467200, 'main': {'temp': 301.60}}  # 28.60°C
+
+# Pipeline skips update due to ON CONFLICT DO NOTHING
+# Database still shows 28.45°C
+```
+
+**Solution:** Use `DO UPDATE SET` if late-arriving corrections are expected.
+
+### Granularity
+
+Idempotency is limited to the timestamp granularity:
+
+- API returns timestamps in **seconds**
+- Multiple observations within the same second would conflict
+- OpenWeather API updates every ~10 minutes, so this is not a practical issue
+
+### Deleted records
+
+Idempotency prevents duplicates but doesn't handle deletions:
+
+```sql
+-- Manually delete a record
+DELETE FROM weather WHERE city_id = 1 AND recorded_at = '2026-03-03 10:00:00';
+
+-- Re-run pipeline with same data
+-- Record is NOT re-inserted (API call at 10:00 won't happen again)
+```
+
+Records can only be recovered through manual backfilling.
+
+## Best practices
+
+1. **Always use event time**: Base idempotency on stable business keys (e.g., `recorded_at`), not system-generated values
+2. **Test retry scenarios**: Verify pipeline can be safely re-run without side effects
+3. **Monitor conflict rates**: High conflict rates may indicate overlapping runs or incorrect scheduling
+4. **Document constraints**: Clearly specify which columns form the idempotency key
+5. **Consider late updates**: Choose `DO NOTHING` vs `DO UPDATE` based on whether source data can change
+
+<Note>
+  Idempotency is a cornerstone of reliable data pipelines. Invest time in getting it right during initial design.
+</Note>

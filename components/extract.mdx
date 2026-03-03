@@ -1,0 +1,162 @@
+---
+title: Extract
+description: Extract weather data from the OpenWeather API with automatic retry logic
+---
+
+The extraction component fetches real-time weather data from the OpenWeather API for multiple cities. It includes robust error handling and automatic retry mechanisms to ensure reliable data collection.
+
+## Overview
+
+The `extract.py` module provides two main functions:
+
+- `fetch_city_weather_data()` - Fetches weather data for a single city with retry logic
+- `fetch_weather_data()` - Orchestrates data extraction for multiple cities
+
+## Function signatures
+
+### fetch_city_weather_data
+
+```python extract.py:10-20
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
+def fetch_city_weather_data(city):
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}"
+
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        
+        return response.json()
+    except Exception:
+        logger.debug(f"Retry weather data extraction for city {city}")
+        raise
+```
+
+### fetch_weather_data
+
+```python extract.py:23-39
+def fetch_weather_data(cities):
+    logger.info("Weather data extraction started")
+
+    weather_data = []
+
+    for city in cities:
+        try:
+            data = fetch_city_weather_data(city=city)
+            weather_data.append(data)
+            logger.info(f"Weather data for city {city} extracted successfully")
+        except Exception as e:
+            logger.exception(f"An error occurred for city {city}: {e}")
+            continue
+    
+    logger.info("Weather data extraction finished successfully")
+    
+    return weather_data
+```
+
+## Retry logic
+
+The extraction component uses the [tenacity](https://tenacity.readthedocs.io/) library to implement automatic retry logic with exponential backoff.
+
+<Note>
+The retry decorator is applied only to single-city requests, allowing the pipeline to continue processing other cities even if one fails after all retries.
+</Note>
+
+### Retry configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `stop` | `stop_after_attempt(3)` | Maximum 3 attempts per city |
+| `wait` | `wait_exponential(multiplier=2, min=2, max=30)` | Exponential backoff with 2x multiplier |
+| `min` wait | 2 seconds | Minimum wait time between retries |
+| `max` wait | 30 seconds | Maximum wait time between retries |
+
+### Retry behavior
+
+<Steps>
+  <Step title="Initial request">
+    The function makes the first API request with a 5-second timeout.
+  </Step>
+  
+  <Step title="First retry (if needed)">
+    After 2 seconds, a second attempt is made (2 seconds wait).
+  </Step>
+  
+  <Step title="Second retry (if needed)">
+    After 4 seconds, a third and final attempt is made (4 seconds wait).
+  </Step>
+  
+  <Step title="Failure handling">
+    If all 3 attempts fail, the exception is logged and the city is skipped.
+  </Step>
+</Steps>
+
+## API integration
+
+The module integrates with the OpenWeather API's current weather endpoint:
+
+```
+https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}
+```
+
+### Request parameters
+
+- `q` - City name (e.g., "London", "New York")
+- `appid` - API key from configuration
+- `timeout` - 5-second request timeout
+
+### Response format
+
+The API returns JSON data containing:
+
+- City information (`name`, `coord`, `country`)
+- Weather conditions (`weather` array)
+- Temperature data (`main.temp`, `main.feels_like`)
+- Atmospheric data (`main.pressure`, `main.humidity`)
+- Wind data (`wind.speed`, `wind.deg`)
+- Timestamp (`dt`)
+
+## Error handling
+
+<Warning>
+If a city fails after all retry attempts, it is logged and skipped. The pipeline continues processing remaining cities to ensure maximum data collection.
+</Warning>
+
+The module implements multiple layers of error handling:
+
+1. **HTTP errors** - `response.raise_for_status()` catches 4xx and 5xx errors
+2. **Network timeouts** - 5-second timeout prevents hanging requests
+3. **Retry logic** - Automatic retries with exponential backoff
+4. **City-level isolation** - Failed cities don't block other cities
+
+## Logging
+
+The extraction process provides detailed logging at multiple levels:
+
+```python extract.py:6-7
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+```
+
+### Log messages
+
+- `INFO` - Extraction started/finished, successful city extractions
+- `DEBUG` - Retry attempts for specific cities
+- `EXCEPTION` - Full error details when a city fails
+
+## Usage example
+
+```python
+from extract import fetch_weather_data
+
+cities = ["London", "New York", "Tokyo", "Sydney"]
+weather_data = fetch_weather_data(cities)
+
+print(f"Successfully extracted data for {len(weather_data)} cities")
+```
+
+## Dependencies
+
+- `requests` - HTTP library for API calls
+- `tenacity` - Retry library with exponential backoff
+- `logging` - Standard Python logging
+- `config` - Custom configuration module for API_KEY

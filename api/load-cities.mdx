@@ -1,0 +1,109 @@
+---
+title: Load cities
+description: Load city dimension data into the database
+---
+
+## load_cities_data()
+
+Loads city dimension data into the PostgreSQL database with automatic retry logic. Inserts city records including name, latitude, and longitude coordinates, skipping duplicates based on city name.
+
+### Parameters
+
+<ParamField path="cities_data" type="list[dict]" required>
+  List of city data dictionaries. Each dictionary must contain:
+  - `name` (str): City name
+  - `coord` (dict): Coordinate object with `lat` and `lon` fields
+  
+  Example structure:
+  ```python
+  [
+    {
+      "name": "London",
+      "coord": {"lat": 51.5074, "lon": -0.1278}
+    },
+    {
+      "name": "Paris",
+      "coord": {"lat": 48.8566, "lon": 2.3522}
+    }
+  ]
+  ```
+</ParamField>
+
+### Returns
+
+This function does not return a value. It logs success or raises an exception on failure.
+
+### Retry behavior
+
+The function is decorated with `@retry` from the `tenacity` library:
+
+- **Maximum attempts**: 3
+- **Wait strategy**: Exponential backoff with multiplier=1, min=1s, max=10s
+- Automatically retries on any exception
+
+### Database operations
+
+- **Table**: `city`
+- **Columns**: `city_name`, `latitude`, `longitude`
+- **Conflict handling**: `ON CONFLICT (city_name) DO NOTHING` - skips duplicate city names
+- **Batch insert**: Uses `executemany()` for efficient bulk insertion
+
+### Example
+
+```python
+from load_cities import load_cities_data
+import logging
+
+# Sample city data from API response
+cities_data = [
+    {
+        "name": "London",
+        "coord": {"lat": 51.5074, "lon": -0.1278}
+    },
+    {
+        "name": "New York",
+        "coord": {"lat": 40.7128, "lon": -74.0060}
+    },
+    {
+        "name": "Tokyo",
+        "coord": {"lat": 35.6762, "lon": 139.6503}
+    }
+]
+
+# Load cities into database
+try:
+    load_cities_data(cities_data)
+    print("Cities loaded successfully")
+except Exception as e:
+    print(f"Failed to load cities: {e}")
+```
+
+### Error handling
+
+The function:
+
+1. Logs exceptions using the module logger
+2. Re-raises exceptions to allow upstream handling
+3. Automatically retries up to 3 times on failure
+4. Logs start and completion messages
+
+### Logging output
+
+```
+2024-01-15 10:30:45,123 | load_cities | INFO | City data loading started
+2024-01-15 10:30:46,456 | load_cities | INFO | City data loading finished successfully
+```
+
+Or on error:
+
+```
+2024-01-15 10:30:45,123 | load_cities | INFO | City data loading started
+2024-01-15 10:30:46,456 | load_cities | ERROR | connection to server failed
+```
+
+### Dependencies
+
+Requires the following imports:
+- `psycopg` - PostgreSQL database adapter
+- `tenacity` - Retry logic
+- `config` - Database connection parameters (host, dbname, port, user, password)

@@ -1,0 +1,505 @@
+---
+title: Monitoring
+description: Learn how to monitor the Weather Microbatch ETL Pipeline using the centralized logging system, debug issues, and track pipeline health
+---
+
+The Weather Microbatch ETL Pipeline includes a centralized logging system that tracks all operations, errors, and performance metrics.
+
+## Logging architecture
+
+### Logger configuration
+
+The logging system is configured in `logger_config.py:1-15`:
+
+```python logger_config.py
+import logging
+
+def setup_logger():
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    format = logging.Formatter("%(asctime)s | %(name)s | %(levelname)s | %(message)s")
+
+    file_handler = logging.FileHandler("./logs/etl.log")
+    file_handler.setFormatter(format)
+
+    if not logger.handlers:
+        logger.addHandler(file_handler)
+
+    return logger
+```
+
+**Logger features:**
+- **Level**: INFO (captures info, warning, error, and critical messages)
+- **Format**: Timestamp | Module name | Level | Message
+- **Output**: File-based logging to `./logs/etl.log`
+- **Handler safety**: Prevents duplicate handlers with `if not logger.handlers`
+
+### Initialization
+
+The logger is initialized at the start of the pipeline in `main.py:8`:
+
+```python main.py
+from logger_config import setup_logger
+
+setup_logger()
+logger = logging.getLogger(__name__)
+```
+
+<Warning>
+  Ensure the `./logs` directory exists before running the pipeline. The file handler will fail if the directory is missing.
+</Warning>
+
+```bash
+mkdir -p logs
+```
+
+## Log locations
+
+### Primary log file
+
+All pipeline logs are written to:
+
+```
+./logs/etl.log
+```
+
+This file contains:
+- Pipeline start/finish events
+- City-level extraction success/failure
+- Database insertion counts
+- Exception stack traces
+- Retry attempts
+
+### Log format
+
+Logs follow this structure:
+
+```
+2024-03-15 10:30:15,234 | __main__ | INFO | ETL pipeline started
+2024-03-15 10:30:15,456 | extract | INFO | Weather data extraction started
+2024-03-15 10:30:16,123 | extract | INFO | Weather data for city Chennai extracted successfully
+2024-03-15 10:30:16,890 | extract | INFO | Weather data for city Bangalore extracted successfully
+2024-03-15 10:30:18,567 | extract | INFO | Weather data extraction finished successfully
+2024-03-15 10:30:19,234 | load | INFO | Weather data loading started
+2024-03-15 10:30:19,876 | load | INFO | Inserted 5 rows into database
+2024-03-15 10:30:19,890 | load | INFO | Weather data loading finished successfully
+2024-03-15 10:30:19,891 | __main__ | INFO | ETL pipeline finished
+```
+
+<Info>
+  The format includes timestamp, module name, log level, and message - making it easy to trace execution flow and identify issues.
+</Info>
+
+## Logging levels by module
+
+Different modules use different logging levels for granular control:
+
+### Main pipeline (main.py)
+
+```python main.py
+logger = logging.getLogger(__name__)
+logger.info("ETL pipeline started")
+logger.info("ETL pipeline finished")
+```
+
+**Level**: INFO - Tracks overall pipeline lifecycle
+
+### Extract layer (extract.py)
+
+```python extract.py
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+logger.info("Weather data extraction started")
+logger.info(f"Weather data for city {city} extracted successfully")
+logger.debug(f"Retry weather data extraction for city {city}")
+logger.exception(f"An error occurred for city {city}: {e}")
+logger.info("Weather data extraction finished successfully")
+```
+
+**Level**: DEBUG - Captures detailed retry attempts and exceptions
+
+**Key events logged:**
+- Extraction start (`extract.py:24`)
+- Per-city success (`extract.py:32`)
+- Retry attempts (`extract.py:19`)
+- Exceptions with stack traces (`extract.py:34`)
+- Extraction completion (`extract.py:37`)
+
+### Load layer (load.py)
+
+```python load.py
+logger = logging.getLogger(__name__)
+
+logger.info("Weather data loading started")
+logger.info(f"Inserted {len(cleaned_data)} rows into database")
+logger.exception(e)
+logger.info("Weather data loading finished successfully")
+```
+
+**Level**: INFO - Tracks database operations and insertion counts
+
+**Key events logged:**
+- Load start (`load.py:10`)
+- Row insertion count (`load.py:41`)
+- Database exceptions (`load.py:43`)
+- Load completion (`load.py:46`)
+
+## Monitoring strategies
+
+<Tabs>
+  <Tab title="Real-time monitoring">
+    Watch logs in real-time as the pipeline executes:
+    
+    ```bash
+    tail -f logs/etl.log
+    ```
+    
+    This is useful for:
+    - Debugging during development
+    - Monitoring manual pipeline runs
+    - Investigating live issues
+  </Tab>
+  
+  <Tab title="Historical analysis">
+    Review historical logs to identify patterns:
+    
+    ```bash
+    # View all ERROR and CRITICAL logs
+    grep -E "ERROR|CRITICAL" logs/etl.log
+    
+    # View logs for specific city
+    grep "Chennai" logs/etl.log
+    
+    # View logs from specific date
+    grep "2024-03-15" logs/etl.log
+    
+    # Count successful runs today
+    grep -c "ETL pipeline finished" logs/etl.log
+    ```
+  </Tab>
+  
+  <Tab title="Scheduled monitoring">
+    Set up automated monitoring with cron jobs:
+    
+    ```bash
+    # Check for errors every hour and send alert
+    0 * * * * grep -c "ERROR" /path/to/logs/etl.log && echo "Errors detected in ETL pipeline" | mail -s "ETL Alert" admin@example.com
+    ```
+  </Tab>
+</Tabs>
+
+## Common log patterns
+
+### Successful execution
+
+```log
+2024-03-15 10:30:15,234 | __main__ | INFO | ETL pipeline started
+2024-03-15 10:30:15,456 | extract | INFO | Weather data extraction started
+2024-03-15 10:30:16,123 | extract | INFO | Weather data for city Chennai extracted successfully
+2024-03-15 10:30:16,456 | extract | INFO | Weather data for city Bangalore extracted successfully
+2024-03-15 10:30:16,789 | extract | INFO | Weather data for city Hyderabad extracted successfully
+2024-03-15 10:30:17,123 | extract | INFO | Weather data for city Mumbai extracted successfully
+2024-03-15 10:30:17,456 | extract | INFO | Weather data for city Delhi extracted successfully
+2024-03-15 10:30:17,567 | extract | INFO | Weather data extraction finished successfully
+2024-03-15 10:30:19,876 | load | INFO | Inserted 5 rows into database
+2024-03-15 10:30:19,890 | __main__ | INFO | ETL pipeline finished
+```
+
+### Retry with recovery
+
+```log
+2024-03-15 10:30:16,123 | extract | DEBUG | Retry weather data extraction for city Chennai
+2024-03-15 10:30:18,234 | extract | DEBUG | Retry weather data extraction for city Chennai
+2024-03-15 10:30:20,456 | extract | INFO | Weather data for city Chennai extracted successfully
+```
+
+### City extraction failure
+
+```log
+2024-03-15 10:30:16,123 | extract | ERROR | An error occurred for city InvalidCity: 404 Client Error: Not Found
+2024-03-15 10:30:16,124 | extract | ERROR | Traceback (most recent call last):
+2024-03-15 10:30:16,124 | extract | ERROR |   File "extract.py", line 30, in fetch_weather_data
+2024-03-15 10:30:16,124 | extract | ERROR |     data = fetch_city_weather_data(city=city)
+```
+
+<Note>
+  The pipeline continues processing other cities even if one city fails, ensuring partial success rather than complete failure.
+</Note>
+
+### Database connection failure
+
+```log
+2024-03-15 10:30:19,234 | load | ERROR | could not connect to server: Connection refused
+2024-03-15 10:30:19,235 | load | ERROR | Traceback (most recent call last):
+```
+
+## Debugging guide
+
+<Steps>
+  <Step title="Identify the failure stage">
+    Check which module logged the error:
+    - `extract` - API connection or authentication issues
+    - `load` - Database connection or schema issues
+    - `__main__` - Configuration or import errors
+  </Step>
+  
+  <Step title="Review the exception stack trace">
+    The `logger.exception()` calls in `extract.py:34` and `load.py:43` log full stack traces, showing:
+    - Exact line number where error occurred
+    - Exception type and message
+    - Call stack leading to the error
+  </Step>
+  
+  <Step title="Check retry attempts">
+    Look for DEBUG-level retry messages:
+    ```
+    grep "Retry weather data extraction" logs/etl.log
+    ```
+    
+    If you see 2 retries before failure, the issue is persistent (not transient).
+  </Step>
+  
+  <Step title="Verify configuration">
+    Most failures stem from configuration issues. Verify:
+    - API key is valid and active
+    - Database credentials are correct
+    - Network connectivity to external services
+  </Step>
+</Steps>
+
+## Advanced monitoring
+
+### Log rotation
+
+Prevent log files from growing indefinitely:
+
+```python logger_config.py
+from logging.handlers import RotatingFileHandler
+
+file_handler = RotatingFileHandler(
+    "./logs/etl.log",
+    maxBytes=10*1024*1024,  # 10 MB
+    backupCount=5  # Keep 5 backup files
+)
+```
+
+This creates:
+- `etl.log` (current)
+- `etl.log.1` (previous)
+- `etl.log.2` through `etl.log.5` (older backups)
+
+### Time-based rotation
+
+Rotate logs daily:
+
+```python logger_config.py
+from logging.handlers import TimedRotatingFileHandler
+
+file_handler = TimedRotatingFileHandler(
+    "./logs/etl.log",
+    when="midnight",
+    interval=1,
+    backupCount=30  # Keep 30 days of logs
+)
+```
+
+### Structured logging with JSON
+
+For easier parsing and analysis:
+
+```python logger_config.py
+import json
+import logging
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_data = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "module": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_data)
+
+file_handler.setFormatter(JSONFormatter())
+```
+
+### Integration with monitoring tools
+
+<CardGroup cols={2}>
+  <Card title="Elasticsearch + Kibana" icon="magnifying-glass-chart">
+    Ship logs to Elasticsearch for powerful search and visualization:
+    
+    ```bash
+    # Using Filebeat
+    filebeat.inputs:
+    - type: log
+      paths:
+        - /path/to/logs/etl.log
+      fields:
+        service: weather-etl
+    ```
+  </Card>
+  
+  <Card title="CloudWatch Logs" icon="cloud">
+    Send logs to AWS CloudWatch:
+    
+    ```python
+    from watchtower import CloudWatchLogHandler
+    
+    cloudwatch_handler = CloudWatchLogHandler(
+        log_group='/aws/etl/weather',
+        stream_name='pipeline'
+    )
+    logger.addHandler(cloudwatch_handler)
+    ```
+  </Card>
+  
+  <Card title="Grafana Loki" icon="chart-line">
+    Use Loki for log aggregation:
+    
+    ```bash
+    # Using Promtail
+    - job_name: weather-etl
+      static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: weather-etl
+          __path__: /path/to/logs/etl.log
+    ```
+  </Card>
+  
+  <Card title="Datadog" icon="database">
+    Forward logs to Datadog:
+    
+    ```python
+    from datadog import initialize, statsd
+    
+    # Log errors as metrics
+    if record.levelname == 'ERROR':
+        statsd.increment('weather_etl.errors')
+    ```
+  </Card>
+</CardGroup>
+
+## Alerting strategies
+
+### File-based alerting
+
+Monitor error count and alert when threshold is exceeded:
+
+```bash alert-check.sh
+#!/bin/bash
+
+ERROR_COUNT=$(grep -c "ERROR" /path/to/logs/etl.log)
+
+if [ $ERROR_COUNT -gt 10 ]; then
+    echo "High error count detected: $ERROR_COUNT errors" | \
+    mail -s "Weather ETL Alert" admin@example.com
+fi
+```
+
+### Database-based alerting
+
+Check for stale data in the warehouse:
+
+```sql
+-- Alert if no data in last 30 minutes
+SELECT COUNT(*) FROM weather 
+WHERE ingested_at > NOW() - INTERVAL '30 minutes';
+```
+
+If count is 0, the pipeline may be failing silently.
+
+### Health check endpoint
+
+Create a simple health check script:
+
+```python health_check.py
+import sys
+from datetime import datetime, timedelta
+import psycopg
+from config import host, dbname, port, user, password
+
+try:
+    with psycopg.connect(host=host, dbname=dbname, port=port, user=user, password=password) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM weather 
+                WHERE ingested_at > NOW() - INTERVAL '30 minutes'
+            """)
+            count = cur.fetchone()[0]
+            
+            if count == 0:
+                print("UNHEALTHY: No recent data")
+                sys.exit(1)
+            else:
+                print(f"HEALTHY: {count} records in last 30 minutes")
+                sys.exit(0)
+except Exception as e:
+    print(f"UNHEALTHY: {e}")
+    sys.exit(1)
+```
+
+Run this via cron or monitoring system:
+
+```bash
+*/5 * * * * /path/to/venv/bin/python health_check.py
+```
+
+## Performance monitoring
+
+Track pipeline execution time:
+
+```python main.py
+import time
+
+start_time = time.time()
+logger.info("ETL pipeline started")
+
+# ... pipeline execution ...
+
+execution_time = time.time() - start_time
+logger.info(f"ETL pipeline finished in {execution_time:.2f} seconds")
+```
+
+Monitor trends:
+- Increasing execution time may indicate API slowdown or data growth
+- Sudden spikes may indicate network issues or retry storms
+
+## Troubleshooting checklist
+
+<AccordionGroup>
+  <Accordion title="No logs being generated">
+    - Verify `./logs` directory exists
+    - Check file permissions (write access required)
+    - Ensure `setup_logger()` is called before any logging
+    - Check for exceptions during logger initialization
+  </Accordion>
+  
+  <Accordion title="Missing log entries">
+    - Check log level (DEBUG messages won't appear at INFO level)
+    - Verify logger is initialized in each module
+    - Flush handlers if using buffered output
+    - Check for handler conflicts (multiple handlers)
+  </Accordion>
+  
+  <Accordion title="Excessive log size">
+    - Implement log rotation (RotatingFileHandler)
+    - Increase log level from DEBUG to INFO
+    - Archive old logs periodically
+    - Use external log aggregation service
+  </Accordion>
+  
+  <Accordion title="Can't find specific errors">
+    - Use grep with appropriate patterns
+    - Check for case sensitivity in searches
+    - Verify timestamp ranges
+    - Use structured logging for easier parsing
+  </Accordion>
+</AccordionGroup>

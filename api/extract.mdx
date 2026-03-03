@@ -1,0 +1,111 @@
+---
+title: Extract module
+description: Functions for extracting weather data from the OpenWeatherMap API with automatic retry logic
+---
+
+The extract module provides functions to fetch weather data from the OpenWeatherMap API for multiple cities. It includes automatic retry logic for handling transient network failures.
+
+## fetch_weather_data
+
+Fetches weather data for multiple cities from the OpenWeatherMap API.
+
+```python
+def fetch_weather_data(cities)
+```
+
+### Parameters
+
+<ParamField path="cities" type="list[str]" required>
+  List of city names to fetch weather data for. City names should match the format expected by the OpenWeatherMap API (e.g., "Chennai", "Bangalore").
+</ParamField>
+
+### Returns
+
+<ResponseField name="weather_data" type="list[dict]">
+  List of weather data dictionaries in JSON format from the OpenWeatherMap API. Each dictionary contains weather information for a single city including temperature, humidity, pressure, wind speed, and weather conditions.
+</ResponseField>
+
+### Behavior
+
+- Iterates through each city in the provided list
+- Calls `fetch_city_weather_data()` for each city
+- Logs successful extractions and errors
+- Continues processing remaining cities if one fails
+- Returns all successfully fetched weather data
+
+### Example usage
+
+```python
+from extract import fetch_weather_data
+from config import cities
+
+# Fetch weather data for configured cities
+weather_data = fetch_weather_data(cities=cities)
+
+# Process the results
+for data in weather_data:
+    print(f"City: {data['name']}, Temp: {data['main']['temp']}K")
+```
+
+## fetch_city_weather_data
+
+Fetches weather data for a single city with automatic retry logic.
+
+```python
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
+def fetch_city_weather_data(city)
+```
+
+### Retry decorator
+
+This function is decorated with `@retry` from the tenacity library:
+
+- **Maximum attempts**: 3
+- **Wait strategy**: Exponential backoff with multiplier=2, minimum 2 seconds, maximum 30 seconds
+- **Behavior**: Automatically retries failed requests with increasing wait times between attempts
+
+### Parameters
+
+<ParamField path="city" type="str" required>
+  Name of the city to fetch weather data for. The city name is used in the OpenWeatherMap API query parameter.
+</ParamField>
+
+### Returns
+
+<ResponseField name="response" type="dict">
+  JSON response from the OpenWeatherMap API containing weather data for the specified city. Includes fields like name, main (temperature, humidity, pressure), weather (description), wind (speed), and dt (timestamp).
+</ResponseField>
+
+### Raises
+
+- **Exception**: Raises any exception encountered during the HTTP request or response processing. The retry decorator will catch and retry these exceptions up to 3 times.
+
+### Behavior
+
+- Constructs API URL with city name and API key
+- Makes GET request with 5-second timeout
+- Raises HTTP errors for bad status codes
+- Returns parsed JSON response
+- Logs retry attempts for debugging
+
+### Example usage
+
+```python
+from extract import fetch_city_weather_data
+
+# Fetch weather data for a single city
+try:
+    data = fetch_city_weather_data(city="Chennai")
+    print(f"Temperature: {data['main']['temp']}K")
+    print(f"Weather: {data['weather'][0]['main']}")
+except Exception as e:
+    print(f"Failed to fetch weather data: {e}")
+```
+
+### Implementation details
+
+The function uses:
+- `requests.get()` with timeout to prevent hanging requests
+- `response.raise_for_status()` to catch HTTP errors
+- Debug logging for retry attempts
+- Source code location: `/home/daytona/workspace/source/src/extract.py:10`

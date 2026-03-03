@@ -1,0 +1,56 @@
+---
+title: Logger configuration
+description: Configure centralized logging for the ETL pipeline
+---
+
+## setup_logger()
+
+Configures and returns a logger instance with file-based logging for the ETL pipeline. The logger writes to `./logs/etl.log` with a standardized format including timestamp, logger name, level, and message.
+
+### Returns
+
+<ParamField path="logger" type="logging.Logger">
+  Configured logger instance set to INFO level with file handler attached
+</ParamField>
+
+### Behavior
+
+- Sets the root logger level to `INFO`
+- Configures a file handler that writes to `./logs/etl.log`
+- Applies a standard format: `"%(asctime)s | %(name)s | %(levelname)s | %(message)s"`
+- Prevents duplicate handlers by checking if handlers already exist
+- Returns the configured logger instance
+
+### Example
+
+```python
+from logger_config import setup_logger
+
+# Initialize the logger
+logger = setup_logger()
+
+# Use the logger throughout your application
+logger.info("ETL pipeline started")
+logger.error("Failed to connect to database")
+logger.warning("Retrying connection...")
+```
+
+### Implementation details
+
+The function uses Python's built-in `logging` module and:
+
+1. Gets the root logger instance
+2. Sets the logging level to INFO
+3. Creates a formatter with timestamp, logger name, level, and message
+4. Configures a file handler pointing to `./logs/etl.log`
+5. Attaches the handler only if no handlers are already present (prevents duplicates)
+
+### Log file format
+
+Log entries follow this format:
+
+```
+2024-01-15 10:30:45,123 | __main__ | INFO | City data loading started
+2024-01-15 10:30:46,456 | extract | WARNING | API rate limit approaching
+2024-01-15 10:30:47,789 | load | ERROR | Database connection failed
+```

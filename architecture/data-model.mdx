@@ -1,0 +1,334 @@
+---
+title: Data model
+description: Understand the database schema with city dimension and weather fact tables
+---
+
+The Weather Microbatch ETL Pipeline uses a **dimensional model** with one dimension table and one fact table, following data warehouse best practices.
+
+## Schema overview
+
+The data model consists of:
+
+- **`city` (dimension table)**: Static geographic metadata about cities
+- **`weather` (fact table)**: Time-series weather observations with foreign key to city dimension
+
+This design enables:
+
+- Efficient joins for analytics queries
+- Normalized storage of city metadata
+- Referential integrity between facts and dimensions
+- Support for incremental microbatch loading
+
+## City dimension table
+
+The `city` table stores geographic metadata for each monitored location.
+
+### Schema structure
+
+```sql
+CREATE TABLE city (
+    city_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_name VARCHAR NOT NULL,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    UNIQUE (city_name)
+);
+```
+
+### Columns
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `city_id` | `BIGINT` | Primary key, auto-increment | Unique identifier for each city |
+| `city_name` | `VARCHAR` | Not null, unique | Name of the city (e.g., "Chennai") |
+| `latitude` | `DOUBLE PRECISION` | Not null | Geographic latitude coordinate |
+| `longitude` | `DOUBLE PRECISION` | Not null | Geographic longitude coordinate |
+
+### Constraints
+
+- **Primary key**: `city_id` ensures each city has a unique identifier
+- **Unique constraint**: `city_name` prevents duplicate city entries
+- **Identity generation**: `city_id` auto-increments on insert
+
+<Note>
+  The `UNIQUE (city_name)` constraint is critical for the idempotent loading pattern used in `load_cities.py:22`.
+</Note>
+
+### Data loading
+
+The city dimension is populated by `load_cities.py`:
+
+```python
+for data in cities_data:
+    records.append((
+        data['name'], 
+        data['coord']['lat'], 
+        data['coord']['lon']
+    ))
+
+insert_query = """INSERT INTO city(city_name, latitude, longitude) 
+                  VALUES(%s, %s, %s) 
+                  ON CONFLICT (city_name) DO NOTHING;"""
+```
+
+**Loading behavior:**
+
+- Extracts city name and coordinates from OpenWeather API response
+- Inserts records in batch using `executemany()`
+- Skips duplicates using `ON CONFLICT (city_name) DO NOTHING`
+- Allows safe re-runs without creating duplicate dimension records
+
+### Sample data
+
+```sql
+SELECT * FROM city;
+```
+
+| city_id | city_name | latitude | longitude |
+|---------|-----------|----------|----------|
+| 1 | Chennai | 13.0878 | 80.2785 |
+| 2 | Bangalore | 12.9762 | 77.6033 |
+| 3 | Hyderabad | 17.3753 | 78.4744 |
+| 4 | Mumbai | 19.0144 | 72.8479 |
+| 5 | Delhi | 28.6517 | 77.2219 |
+
+## Weather fact table
+
+The `weather` table stores time-series weather observations for each city.
+
+### Schema structure
+
+```sql
+CREATE TABLE weather (
+    weather_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_id BIGINT NOT NULL,
+    weather_description VARCHAR NOT NULL,
+    temperature_c DOUBLE PRECISION NOT NULL,
+    temperature_feels_like_c DOUBLE PRECISION NOT NULL,
+    humidity_percentage INTEGER NOT NULL,
+    pressure_hpa INTEGER NOT NULL,
+    wind_speed DOUBLE PRECISION NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    ingested_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (city_id) REFERENCES city(city_id),
+    UNIQUE (city_id, recorded_at)
+);
+```
+
+### Columns
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `weather_id` | `BIGINT` | Primary key, auto-increment | Unique identifier for each observation |
+| `city_id` | `BIGINT` | Foreign key, not null | References `city.city_id` |
+| `weather_description` | `VARCHAR` | Not null | Condition summary (e.g., "Clear", "Rain") |
+| `temperature_c` | `DOUBLE PRECISION` | Not null | Temperature in Celsius |
+| `temperature_feels_like_c` | `DOUBLE PRECISION` | Not null | Perceived temperature in Celsius |
+| `humidity_percentage` | `INTEGER` | Not null | Relative humidity (0-100%) |
+| `pressure_hpa` | `INTEGER` | Not null | Atmospheric pressure in hectopascals |
+| `wind_speed` | `DOUBLE PRECISION` | Not null | Wind speed in meters/second |
+| `recorded_at` | `TIMESTAMPTZ` | Not null | When weather was observed (event time) |
+| `ingested_at` | `TIMESTAMPTZ` | Default now() | When record was loaded (system time) |
+
+### Constraints
+
+- **Primary key**: `weather_id` ensures each observation is unique
+- **Foreign key**: `city_id` references `city(city_id)` for referential integrity
+- **Unique constraint**: `(city_id, recorded_at)` prevents duplicate observations
+- **Not null**: All measurement columns required
+
+<Warning>
+  The `UNIQUE (city_id, recorded_at)` constraint is the foundation of the pipeline's idempotency. Removing it will allow duplicate weather records.
+</Warning>
+
+### Data loading
+
+The weather fact table is populated by `load.py`:
+
+#### Step 1: Foreign key resolution
+
+The loader queries the city dimension to build a mapping:
+
+```python
+select_query = "SELECT city_name, city_id FROM city;"
+cur.execute(select_query)
+
+rows = cur.fetchall()
+city_id = {city_name: city_id for city_name, city_id in rows}
+```
+
+This creates a dictionary like:
+
+```python
+{
+    'Chennai': 1,
+    'Bangalore': 2,
+    'Hyderabad': 3,
+    'Mumbai': 4,
+    'Delhi': 5
+}
+```
+
+#### Step 2: Data preparation
+
+The transformed DataFrame is enriched with foreign keys:
+
+```python
+cleaned_data['city_id'] = cleaned_data['city'].map(city_id)
+cleaned_data = cleaned_data.drop(columns=['city'])
+cleaned_data = cleaned_data[[
+    'city_id',
+    'weather_description',
+    'temp_c',
+    'temp_feels_like_c',
+    'humidity_percentage',
+    'pressure_hpa',
+    'wind_speed',
+    'recorded_at'
+]]
+```
+
+#### Step 3: Batch insert
+
+Records are inserted with conflict handling:
+
+```python
+insert_query = """INSERT INTO weather(
+    city_id, weather_description, temperature_c, 
+    temperature_feels_like_c, humidity_percentage, 
+    pressure_hpa, wind_speed, recorded_at
+) VALUES(%s, %s, %s, %s, %s, %s, %s, %s) 
+ON CONFLICT (city_id, recorded_at) DO NOTHING;"""
+
+cur.executemany(insert_query, cleaned_data)
+```
+
+<Note>
+  The `ON CONFLICT (city_id, recorded_at) DO NOTHING` clause ensures idempotent loads. See [Idempotency](/architecture/idempotency) for details.
+</Note>
+
+### Sample data
+
+```sql
+SELECT w.weather_id, c.city_name, w.weather_description, 
+       w.temperature_c, w.recorded_at 
+FROM weather w
+JOIN city c ON w.city_id = c.city_id
+LIMIT 5;
+```
+
+| weather_id | city_name | weather_description | temperature_c | recorded_at |
+|------------|-----------|---------------------|---------------|-------------|
+| 1 | Chennai | Clear | 28.45 | 2026-03-03 10:00:00+00 |
+| 2 | Bangalore | Clouds | 24.12 | 2026-03-03 10:00:00+00 |
+| 3 | Hyderabad | Rain | 22.78 | 2026-03-03 10:00:00+00 |
+| 4 | Mumbai | Clear | 30.56 | 2026-03-03 10:00:00+00 |
+| 5 | Delhi | Haze | 18.23 | 2026-03-03 10:00:00+00 |
+
+## Dimensional modeling benefits
+
+### Normalized storage
+
+City metadata (name, coordinates) is stored once in the dimension table, not repeated for every weather observation. This:
+
+- Reduces storage size
+- Ensures consistency
+- Simplifies updates to city metadata
+
+### Referential integrity
+
+The foreign key constraint ensures:
+
+```sql
+FOREIGN KEY (city_id) REFERENCES city(city_id)
+```
+
+- Every weather record must have a valid city
+- Cities cannot be deleted if they have weather observations
+- Data integrity enforced at database level
+
+### Query performance
+
+The model supports efficient analytics queries:
+
+```sql
+-- Average temperature by city
+SELECT c.city_name, AVG(w.temperature_c) as avg_temp
+FROM weather w
+JOIN city c ON w.city_id = c.city_id
+GROUP BY c.city_name;
+
+-- Time series for specific city
+SELECT recorded_at, temperature_c, humidity_percentage
+FROM weather
+WHERE city_id = 1
+ORDER BY recorded_at DESC
+LIMIT 100;
+```
+
+## Event time vs system time
+
+The weather table tracks two timestamps:
+
+### Event time: `recorded_at`
+
+When the weather was actually observed:
+
+- Extracted from API response: `data['dt']` (Unix timestamp)
+- Converted to UTC: `pd.to_datetime(data['dt'], utc=True, unit='s')`
+- Used in uniqueness constraint: `UNIQUE (city_id, recorded_at)`
+
+**Use case**: Time-series analysis, trend detection, temporal queries
+
+### System time: `ingested_at`
+
+When the record was loaded into the warehouse:
+
+- Auto-populated: `DEFAULT CURRENT_TIMESTAMP`
+- Not part of uniqueness constraint
+- May differ from `recorded_at` due to processing delays
+
+**Use case**: Data lineage, debugging, reprocessing detection
+
+<Note>
+  Using `recorded_at` (event time) in the uniqueness constraint ensures idempotency based on actual weather observation time, not when the pipeline runs.
+</Note>
+
+## Schema initialization
+
+Before running the pipeline, create the database schema:
+
+```sql
+-- Create city dimension table
+CREATE TABLE city (
+    city_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_name VARCHAR NOT NULL,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    UNIQUE (city_name)
+);
+
+-- Create weather fact table
+CREATE TABLE weather (
+    weather_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    city_id BIGINT NOT NULL,
+    weather_description VARCHAR NOT NULL,
+    temperature_c DOUBLE PRECISION NOT NULL,
+    temperature_feels_like_c DOUBLE PRECISION NOT NULL,
+    humidity_percentage INTEGER NOT NULL,
+    pressure_hpa INTEGER NOT NULL,
+    wind_speed DOUBLE PRECISION NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    ingested_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (city_id) REFERENCES city(city_id),
+    UNIQUE (city_id, recorded_at)
+);
+
+-- Create index for common query patterns
+CREATE INDEX idx_weather_city_time ON weather(city_id, recorded_at DESC);
+CREATE INDEX idx_weather_recorded_at ON weather(recorded_at DESC);
+```
+
+<Warning>
+  The city dimension table must be created and populated before loading weather data, as the weather table has a foreign key dependency.
+</Warning>

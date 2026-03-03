@@ -1,0 +1,320 @@
+---
+title: Running the pipeline
+description: Learn how to execute the Weather Microbatch ETL Pipeline, understand its execution flow, and configure scheduling for production
+---
+
+The Weather Microbatch ETL Pipeline is executed through the main entry point in `main.py`, orchestrating the extract, transform, and load operations.
+
+## Pipeline execution
+
+### Running the pipeline manually
+
+Execute the pipeline from the command line:
+
+```bash
+python src/main.py
+```
+
+This runs the complete ETL process:
+
+1. Fetches weather data from OpenWeather API for configured cities
+2. Transforms raw data into analytics-ready format
+3. Loads data into PostgreSQL data warehouse
+
+<Info>
+  Ensure your [configuration](/operations/configuration) is set up correctly before running the pipeline.
+</Info>
+
+### Main pipeline flow
+
+The `main.py:1-18` orchestrates the entire ETL process:
+
+```python main.py
+import logging
+from extract import fetch_weather_data
+from transform import transform_weather_data
+from load import load_weather_data
+from config import cities
+from logger_config import setup_logger
+
+setup_logger()
+
+logger = logging.getLogger(__name__)
+
+logger.info("ETL pipeline started")
+
+weather_data = fetch_weather_data(cities=cities)
+cleaned_data = transform_weather_data(weather_data=weather_data)
+load_weather_data(cleaned_data=cleaned_data)
+
+logger.info("ETL pipeline finished")
+```
+
+## Execution stages
+
+<Steps>
+  <Step title="Initialize logging">
+    The pipeline sets up centralized logging using `setup_logger()` from `logger_config.py:3`. All subsequent operations write to `./logs/etl.log`.
+  </Step>
+  
+  <Step title="Extract weather data">
+    Calls `fetch_weather_data(cities=cities)` from `extract.py:23` to retrieve current weather for all configured cities from the OpenWeather API.
+    
+    **Features:**
+    - Retry logic with exponential backoff (3 attempts)
+    - 5-second timeout per request
+    - Graceful error handling (continues if one city fails)
+  </Step>
+  
+  <Step title="Transform data">
+    Calls `transform_weather_data(weather_data=weather_data)` to clean and normalize the raw API response.
+    
+    **Transformations:**
+    - Convert temperatures from Kelvin to Celsius
+    - Parse Unix timestamps to datetime
+    - Normalize field names for database schema
+  </Step>
+  
+  <Step title="Load to database">
+    Calls `load_weather_data(cleaned_data=cleaned_data)` from `load.py:9` to insert data into PostgreSQL.
+    
+    **Features:**
+    - Idempotent inserts using `ON CONFLICT DO NOTHING`
+    - Foreign key resolution with city dimension table
+    - Transaction safety with automatic rollback
+  </Step>
+</Steps>
+
+## Retry and resilience
+
+The pipeline implements robust retry mechanisms for external dependencies.
+
+### API retry logic
+
+The extraction layer (`extract.py:9-10`) uses exponential backoff:
+
+```python extract.py
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
+def fetch_city_weather_data(city):
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        logger.debug(f"Retry weather data extraction for city {city}")
+        raise
+```
+
+**Retry behavior:**
+- Attempts: 3 total (1 initial + 2 retries)
+- Wait time: 2s, 4s, 8s (exponential with multiplier=2)
+- Max wait: 30 seconds
+- Timeout: 5 seconds per request
+
+### Database retry logic
+
+The load layer (`load.py:8`) implements similar retry logic:
+
+```python load.py
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+def load_weather_data(cleaned_data):
+    # Database operations
+```
+
+**Retry behavior:**
+- Attempts: 3 total
+- Wait time: 1s, 2s, 4s (exponential with multiplier=1)
+- Max wait: 10 seconds
+
+<Warning>
+  Retry logic helps handle transient failures (network issues, temporary API downtime). However, it will not fix configuration errors or authentication issues.
+</Warning>
+
+## Scheduling for production
+
+The pipeline is designed for microbatch execution every 15 minutes.
+
+### Using cron
+
+Schedule the pipeline using crontab:
+
+```bash
+# Run every 15 minutes
+*/15 * * * * cd /path/to/project && /path/to/venv/bin/python src/main.py >> /var/log/weather-etl-cron.log 2>&1
+```
+
+<Tabs>
+  <Tab title="Every 15 minutes">
+    ```bash
+    */15 * * * * cd /path/to/project && python src/main.py
+    ```
+  </Tab>
+  
+  <Tab title="Every hour">
+    ```bash
+    0 * * * * cd /path/to/project && python src/main.py
+    ```
+  </Tab>
+  
+  <Tab title="Daily at midnight">
+    ```bash
+    0 0 * * * cd /path/to/project && python src/main.py
+    ```
+  </Tab>
+</Tabs>
+
+### Using Apache Airflow
+
+For more sophisticated orchestration, use Apache Airflow:
+
+```python
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    'owner': 'data-team',
+    'depends_on_past': False,
+    'start_date': datetime(2024, 1, 1),
+    'retries': 3,
+    'retry_delay': timedelta(minutes=5),
+}
+
+dag = DAG(
+    'weather_etl_microbatch',
+    default_args=default_args,
+    description='Weather microbatch ETL pipeline',
+    schedule_interval='*/15 * * * *',  # Every 15 minutes
+    catchup=False,
+)
+
+run_etl = BashOperator(
+    task_id='run_weather_etl',
+    bash_command='cd /path/to/project && python src/main.py',
+    dag=dag,
+)
+```
+
+<Info>
+  Airflow provides additional benefits like dependency management, monitoring UI, alerting, and retry policies separate from application-level retries.
+</Info>
+
+### Using systemd timers
+
+For Linux systems, create a systemd service and timer:
+
+**Service file** (`/etc/systemd/system/weather-etl.service`):
+
+```ini
+[Unit]
+Description=Weather ETL Pipeline
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=etl-user
+WorkingDirectory=/path/to/project
+Environment="PATH=/path/to/venv/bin"
+ExecStart=/path/to/venv/bin/python src/main.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Timer file** (`/etc/systemd/system/weather-etl.timer`):
+
+```ini
+[Unit]
+Description=Weather ETL Pipeline Timer
+Requires=weather-etl.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=weather-etl.service
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable and start the timer:
+
+```bash
+sudo systemctl enable weather-etl.timer
+sudo systemctl start weather-etl.timer
+sudo systemctl status weather-etl.timer
+```
+
+## Execution considerations
+
+<CardGroup cols={2}>
+  <Card title="Idempotency" icon="rotate">
+    The pipeline is fully idempotent. Re-running for the same time period will not create duplicates, thanks to `ON CONFLICT (city_id, recorded_at) DO NOTHING` in `load.py:37`.
+  </Card>
+  
+  <Card title="Rate limits" icon="gauge-high">
+    OpenWeather free tier allows 60 calls/minute. With 5 cities, each run makes 5 calls. At 15-minute intervals, you'll make 20 calls/hour (well within limits).
+  </Card>
+  
+  <Card title="Execution time" icon="clock">
+    Typical execution time is 2-5 seconds for 5 cities. Factor in retry delays for scheduling - allow at least 2-3 minutes between runs to handle worst-case retries.
+  </Card>
+  
+  <Card title="Failure handling" icon="triangle-exclamation">
+    If a city fetch fails after all retries, the pipeline continues processing other cities. Check logs to identify persistent failures.
+  </Card>
+</CardGroup>
+
+## Pre-flight checklist
+
+Before running the pipeline, ensure:
+
+<Steps>
+  <Step title="Database is ready">
+    - PostgreSQL is running and accessible
+    - Database schema is created (city and weather tables)
+    - City dimension table is populated with `load_cities.py`
+  </Step>
+  
+  <Step title="Configuration is valid">
+    - `.env` file exists with all required variables
+    - API key is active and valid
+    - Database credentials are correct
+  </Step>
+  
+  <Step title="Dependencies are installed">
+    ```bash
+    pip install -r requirements.txt
+    ```
+  </Step>
+  
+  <Step title="Logs directory exists">
+    ```bash
+    mkdir -p logs
+    ```
+    
+    The pipeline writes to `./logs/etl.log` and will fail if the directory doesn't exist.
+  </Step>
+</Steps>
+
+## Monitoring execution
+
+Monitor pipeline execution through:
+
+1. **Log files**: Check `./logs/etl.log` for detailed execution logs
+2. **Exit codes**: The script returns 0 on success, non-zero on failure
+3. **Database checks**: Query the `weather` table to verify new records
+
+```sql
+-- Check latest ingestion
+SELECT city_id, recorded_at, ingested_at 
+FROM weather 
+ORDER BY ingested_at DESC 
+LIMIT 10;
+```
+
+For comprehensive monitoring setup, see [Monitoring](/operations/monitoring).

@@ -1,0 +1,91 @@
+---
+title: Transform module
+description: Functions for transforming raw weather data into a cleaned pandas DataFrame
+---
+
+The transform module processes raw weather data from the OpenWeatherMap API and converts it into a structured pandas DataFrame with standardized units and naming conventions.
+
+## transform_weather_data
+
+Transforms raw weather data from OpenWeatherMap API format into a cleaned pandas DataFrame.
+
+```python
+def transform_weather_data(weather_data)
+```
+
+### Parameters
+
+<ParamField path="weather_data" type="list[dict]" required>
+  List of weather data dictionaries in the raw JSON format returned by the OpenWeatherMap API. Each dictionary should contain the standard API response structure with 'name', 'main', 'weather', 'wind', and 'dt' fields.
+</ParamField>
+
+### Returns
+
+<ResponseField name="dataframe" type="pandas.DataFrame">
+  DataFrame with the following columns:
+  - `city` (str): City name
+  - `weather_description` (str): Main weather condition (e.g., "Clear", "Clouds", "Rain")
+  - `temp_c` (float): Temperature in Celsius, rounded to 2 decimal places
+  - `temp_feels_like_c` (float): "Feels like" temperature in Celsius, rounded to 2 decimal places
+  - `humidity_percentage` (int): Relative humidity percentage
+  - `pressure_hpa` (int): Atmospheric pressure in hPa
+  - `wind_speed` (float): Wind speed in m/s, rounded to 2 decimal places
+  - `recorded_at` (datetime): UTC timestamp when the weather data was recorded
+</ResponseField>
+
+### Transformations performed
+
+The function performs the following data transformations:
+
+1. **Temperature conversion**: Converts temperature from Kelvin to Celsius using the formula: `(temp_kelvin - 273.15)` and rounds to 2 decimal places
+2. **Feels-like temperature conversion**: Converts "feels like" temperature from Kelvin to Celsius with the same formula
+3. **Weather description extraction**: Extracts the main weather condition from the first element of the weather array
+4. **Timestamp conversion**: Converts Unix timestamp to pandas datetime object in UTC timezone
+5. **Wind speed rounding**: Rounds wind speed to 2 decimal places
+6. **Field renaming**: Maps API field names to descriptive column names with units
+
+### Data structure mapping
+
+| Source API Field | Target DataFrame Column | Transformation |
+|-----------------|------------------------|----------------|
+| `data['name']` | `city` | Direct mapping |
+| `data['weather'][0]['main']` | `weather_description` | Extract first weather element |
+| `data['main']['temp']` | `temp_c` | Kelvin to Celsius, round to 2 decimals |
+| `data['main']['feels_like']` | `temp_feels_like_c` | Kelvin to Celsius, round to 2 decimals |
+| `data['main']['humidity']` | `humidity_percentage` | Direct mapping |
+| `data['main']['pressure']` | `pressure_hpa` | Direct mapping |
+| `data['wind']['speed']` | `wind_speed` | Round to 2 decimals |
+| `data['dt']` | `recorded_at` | Unix timestamp to UTC datetime |
+
+### Example usage
+
+```python
+from extract import fetch_weather_data
+from transform import transform_weather_data
+from config import cities
+
+# Extract raw weather data
+weather_data = fetch_weather_data(cities=cities)
+
+# Transform to cleaned DataFrame
+cleaned_data = transform_weather_data(weather_data=weather_data)
+
+# Inspect the results
+print(cleaned_data.head())
+print(f"\nDataFrame shape: {cleaned_data.shape}")
+print(f"Columns: {cleaned_data.columns.tolist()}")
+```
+
+### Example output
+
+```
+       city weather_description  temp_c  temp_feels_like_c  humidity_percentage  pressure_hpa  wind_speed           recorded_at
+0   Chennai               Clear   28.45              30.12                   65          1012        3.50 2024-03-15 10:30:00+00:00
+1 Bangalore              Clouds   22.80              22.15                   78          1015        2.10 2024-03-15 10:30:00+00:00
+```
+
+### Implementation details
+
+- Uses pandas for DataFrame creation and datetime handling
+- Logs transformation start and completion
+- Source code location: `/home/daytona/workspace/source/src/transform.py:6`
