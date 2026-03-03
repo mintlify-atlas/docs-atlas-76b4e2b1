@@ -1,0 +1,87 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Weather Microbatch ETL Pipeline",
+  "projectDescription": "Production-grade microbatch ETL pipeline that extracts weather data from OpenWeather API, transforms it, and loads it into PostgreSQL with idempotent, retry-safe design.",
+  "theme": "aspen",
+  "primaryColor": "#3B82F6",
+  "lightColor": "#60A5FA",
+  "darkColor": "#1E40AF",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/data-model",
+              "architecture/idempotency"
+            ]
+          },
+          {
+            "group": "Components",
+            "pages": [
+              "components/extract",
+              "components/transform",
+              "components/load"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/configuration",
+              "operations/running-pipeline",
+              "operations/monitoring"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Modules",
+            "pages": [
+              "api/extract",
+              "api/transform",
+              "api/load",
+              "api/config"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/logger",
+              "api/load-cities"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Microbatch processing with 15-minute intervals",
+    "Idempotent data loading with conflict resolution",
+    "Exponential retry logic with tenacity",
+    "Dimensional modeling (city dimension, weather fact)",
+    "Transaction-safe PostgreSQL operations",
+    "Centralized logging system",
+    "Event-time vs ingestion-time tracking"
+  ],
+  "publicApiSurface": [
+    "fetch_weather_data(cities)",
+    "fetch_city_weather_data(city)",
+    "transform_weather_data(weather_data)",
+    "load_weather_data(cleaned_data)",
+    "load_cities_data(cities_data)",
+    "setup_logger()"
+  ]
+}
